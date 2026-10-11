@@ -435,6 +435,7 @@ test('ensureFreeLaneShape injects gate tools into toolless chat bodies', () => {
   assert.notEqual(next, undefined)
   assert.deepEqual(next.messages, payload.messages, 'messages untouched')
   const tools = next.tools as Array<{ type: string; function: { name: string } }>
+  // the shipped recipe (issue #56 verified): bash+read, minimal and host-named
   assert.deepEqual(tools.map((t) => t.function.name).sort(), ['bash', 'read'])
   assert.equal(next.tool_choice, 'none', 'injected-only stubs are call-disabled')
 })
@@ -494,3 +495,4 @@ test('Responses free-lane bodies carry flat gate tools and supported tool choice
   assert.equal(ensureResponsesFreeLaneShape(rewritten), undefined)
   assert.equal(ensureResponsesFreeLaneShape({ messages: [] }), undefined)
 })
+

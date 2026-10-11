@@ -245,15 +245,20 @@ export async function admitCandidate(
 
     // Step 4: anonymous-lane smoke (streaming, 1 token). The free lane
     // rejects non-streaming bodies outright and wants the agent-shape gate
-    // tools in the body (adapter/messages.ts, live-probed 2026-09-18) — a
-    // bare 1-token probe 403s like every toolless chat.
+    // tools in the body; since ~2026-10-09 (issue #56) it additionally
+    // requires a canonical ses_* session header — the same disguise the
+    // adapter sends on every chat request (adapter/ids.ts).
     const smoke = await request(`${zenBase.replace(/\/+$/, '')}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         authorization: 'Bearer public',
         'content-type': 'application/json',
-        'user-agent': opencodeUserAgent(),
-        'x-opencode-client': 'cli',
+        ...disguiseHeaders({
+          session: canonicalSessionID('opencode2dsh:admission-smoke'),
+          request: randomID('req', 16),
+          project: stableID('prj', 'opencode2dsh:admission'),
+          parentSession: '',
+        }),
         ...probeHeaders,
       },
       body: JSON.stringify({

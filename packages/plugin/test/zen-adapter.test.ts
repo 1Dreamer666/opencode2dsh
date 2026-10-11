@@ -141,7 +141,7 @@ test('listModels awaits the catalog warm before reading (issue #45)', async () =
   const adapter = new ZenAdapter({
     list: () => {
       if (warmCalls > 0) readAfterWarm = true
-      return ['exo-free']
+      return ['step-5-preview-free']
     },
     decision: () => ({ allowed: true, source: 'test', known: true }),
     reasoningCapability: () => undefined,
@@ -152,7 +152,7 @@ test('listModels awaits the catalog warm before reading (issue #45)', async () =
   const models = await adapter.listModels('opencode2dsh')
   assert.equal(warmCalls, 1)
   assert.ok(readAfterWarm, 'the roster was read only after warm() resolved')
-  assert.deepEqual(models.map((m) => m.id), ['exo-free'])
+  assert.deepEqual(models.map((m) => m.id), ['step-5-preview-free'])
 })
 
 test('listModels answers from the live roster once the first fetch lands (issue #45)', async () => {
@@ -166,8 +166,8 @@ test('listModels answers from the live roster once the first fetch lands (issue 
   const fetchImpl = (async (url: string | URL) => {
     if (String(url).includes('/v1/models')) await gate
     const body = String(url).includes('/v1/models')
-      ? { data: [{ id: 'exo-free' }, { id: 'fledge-alpha-free' }] }
-      : { opencode: { models: { 'exo-free': { cost: { input: 0, output: 0 } }, 'fledge-alpha-free': { cost: { input: 0, output: 0 } } } } }
+      ? { data: [{ id: 'step-5-preview-free' }, { id: 'fledge-alpha-free' }] }
+      : { opencode: { models: { 'step-5-preview-free': { cost: { input: 0, output: 0 } }, 'fledge-alpha-free': { cost: { input: 0, output: 0 } } } } }
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
   const catalog = new ModelCatalog({ fetchImpl })
@@ -176,7 +176,7 @@ test('listModels answers from the live roster once the first fetch lands (issue 
     const listing = adapter.listModels('opencode2dsh')
     queueMicrotask(() => release?.())
     const models = await listing
-    assert.deepEqual(models.map((m) => m.id), ['exo-free', 'fledge-alpha-free'])
+    assert.deepEqual(models.map((m) => m.id), ['fledge-alpha-free', 'step-5-preview-free'])
   } finally {
     catalog.stop()
   }
@@ -248,7 +248,7 @@ function capturingProvider() {
   return { provider, captured }
 }
 
-/** A body that already satisfies the free-lane agent-shape gate. */
+/** A body that already satisfies the free-lane gate recipe (issue #56). */
 const gateBody = {
   model: 'big-pickle',
   messages: [{ role: 'user', content: 'hi' }],
@@ -481,4 +481,65 @@ test('Responses streams pass a valid reasoning option and sanitize the payload',
   assert.equal(payload.reasoning_effort, undefined)
   assert.equal(payload.tool_choice, 'auto')
   assert.deepEqual((payload.tools as Array<{ name: string }>).map((tool) => tool.name), ['bash', 'read'])
+})
+
+test('the wire request carries the canonical session the free-lane gate requires (issue #56)', async () => {
+  let headers: Record<string, string> | undefined
+  const provider = {
+    streamSimple(_model: unknown, _context: unknown, options: { headers?: Record<string, string> }): AsyncIterable<{ type: string }> {
+      headers = options.headers
+      return (async function* () {
+        yield { type: 'start' }
+        yield { type: 'done', message: { stopReason: 'stop', content: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }
+      })()
+    },
+  }
+  const adapter = new ZenAdapter(
+    {
+      list: () => ['big-pickle'],
+      decision: () => ({ allowed: true, source: 'test', known: true }),
+      reasoningCapability: () => undefined,
+    },
+    { providerOverride: provider },
+  )
+  for await (const chunk of adapter.stream({ provider: 'opencode2dsh', model: 'big-pickle', messages: [] })) void chunk
+  // live-probed 2026-10-11: the gate answers 403 unless a canonical ses_* id
+  // rides a session header (x-opencode-session / x-session-affinity /
+  // X-Session-Id — any one suffices); the adapter sends all three.
+  for (const name of ['x-opencode-session', 'x-session-affinity', 'X-Session-Id']) {
+    assert.match(headers?.[name] ?? '', /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/, name + ' carries the canonical shape')
+  }
+  assert.equal(headers?.['x-opencode-client'], 'cli')
+  assert.match(headers?.['user-agent'] ?? '', /^opencode/)
+})
+
+test('the tool-name alias seam passes through names unchanged on the shipped recipe', async () => {
+  // GATE_TOOL_ALIASES is empty today (bash+read are host-named); the seam in
+  // toStreamChunks exists for a future gate spelling that forces an alias.
+  const provider = {
+    streamSimple(_model: unknown, _context: unknown, _options: unknown): AsyncIterable<{ type: string }> {
+      return (async function* () {
+        yield { type: 'start' }
+        yield { type: 'toolcall_start', contentIndex: 0, partial: { content: [{ type: 'toolCall', id: 'call_1', name: 'bash' }] } }
+        yield { type: 'toolcall_delta', contentIndex: 0, delta: '{"command":"ls"}' }
+        yield { type: 'toolcall_end', contentIndex: 0, toolCall: { id: 'call_1', name: 'bash', arguments: { command: 'ls' } } }
+        yield { type: 'done', message: { stopReason: 'toolUse', content: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }
+      })()
+    },
+  }
+  const adapter = new ZenAdapter(
+    {
+      list: () => ['big-pickle'],
+      decision: () => ({ allowed: true, source: 'test', known: true }),
+      reasoningCapability: () => undefined,
+    },
+    { providerOverride: provider },
+  )
+  const names: string[] = []
+  for await (const chunk of adapter.stream({ provider: 'opencode2dsh', model: 'big-pickle', messages: [] })) {
+    if (chunk.type === 'tool-call-delta' && chunk.name !== undefined) names.push(chunk.name)
+    if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') names.push(chunk.block.name)
+  }
+  assert.ok(names.length > 0)
+  assert.ok(names.every((name) => name === 'bash'), 'names pass through: ' + JSON.stringify(names))
 })
