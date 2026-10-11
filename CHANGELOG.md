@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.11 (2026-10-11)
+
+### Fixed
+
+- Anonymous free-lane chats survive the session-header gate that went live ~2026-10-09 (#56). Ablation probes against the live lane (2026-10-11) pin the gate to a canonical `ses_*` id in a session header (`x-opencode-session` / `x-session-affinity` / `X-Session-Id`, any one) — not the endpoint or the credential: `/zen/v1` + `Bearer public` + the canonical session the adapter already sends still answers 200, while `/inference/openai` 401s the Bearer. The one path that actually broke was the IP-pool admission smoke probe, which built its own request without the disguise headers; it now sends the full set. Also from the issue's live matrix: a `FREE_LANE_BLOCKLIST` denies the five models the lane can never serve (`exo-free` 410, `jev-1.13-free` SystemOne-only 400, `ling-3.0-flash-fin-free` 400, `muse-spark-1.*-contributor-free` 403 RegionError) ahead of any metadata or S3 vouch, in `list()` and `decision()` alike; and a `LOCAL_MODEL_OVERRIDES` table corrects models.dev's `mimo-v2.6-flash-free` context window (200000 → 1048576, per the MiMo card and the official CLI config). A `GATE_TOOL_ALIASES` seam (with `toolNameAlias` on `toStreamChunks`) stays ready for a future gate spelling that forces a wire alias such as `shell`.
+- Cold boots no longer reject an explicit reasoning effort with `UNSUPPORTED_REASONING_EFFORT` when models.dev is slower than `warm()`'s window (#55). `refreshMetadata()` is now stale-while-revalidate: a fresh disk cache (< 7 days) loads as the capability baseline BEFORE the online fetch, so `reasoningCapability()`/`limits()`/`modalities()` answer immediately on a slow-but-healthy network (23s observed); the online answer still replaces the baseline when it lands, and the failure fallback is unchanged.
+
 ## 0.3.10 (2026-10-09)
 
 ### Fixed
