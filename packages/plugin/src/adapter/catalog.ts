@@ -16,6 +16,24 @@ import { opencodeUserAgent } from './ids.ts'
 
 export const ZEN_BASE_URL = 'https://opencode.ai/zen'
 
+/**
+ * Free-lane blocklist (issue #56 live matrix, 2026-10-10): models the live
+ * chat lane can never serve. The Zen catalog still lists them, so S1 alone
+ * exposes dead ids — one exclusion reason per model:
+ *   exo-free                             410 ModelDeprecated (upstream delisted)
+ *   jev-1.13-free                        400 ModelProtocolUnsupported (SystemOne-only)
+ *   ling-3.0-flash-fin-free              400 "Model is unavailable" (upstream-side)
+ *   muse-spark-1.*-contributor-free      403 RegionError, chat and responses alike
+ * Remove an entry only after a live probe of the chat lane answers 200/429.
+ */
+export const FREE_LANE_BLOCKLIST: ReadonlySet<string> = new Set([
+  'exo-free',
+  'jev-1.13-free',
+  'ling-3.0-flash-fin-free',
+  'muse-spark-1.2-contributor-free',
+  'muse-spark-1.3-contributor-free',
+])
+
 /** Verified against the anonymous lane with a real chat (agent/internal/catalog/static_models.go). */
 export const staticFreeModels: string[] = [
   'big-pickle', // verified 2026-08-28: anonymous chat 200 (non-stream + stream)
@@ -88,6 +106,24 @@ export function decide(model: string, prices: Map<string, ModelPrice>, ready: bo
     return { allowed: false, source: 'metadata_cost_unknown', known: false }
   }
   return { allowed: false, source: 'metadata_paid', known: true }
+}
+
+/**
+ * models.dev fields the plugin knowingly overrides (issue #56 metadata note):
+ * the feed declares `mimo-v2.6-flash-free` with `limit.context: 200000`, while
+ * the MiMo V2.6 Flash model card and the official OpenCode CLI config use
+ * 1048576. Checked BEFORE the metadata in `limits()`/`reasoningCapability()`/
+ * `modalities()` — a fixed feed deletes its entry here.
+ */
+const LOCAL_MODEL_OVERRIDES: Readonly<Record<string, Partial<ModelPrice>>> = {
+  'mimo-v2.6-flash-free': { contextWindow: 1048576 },
+}
+
+/** Shallow per-field override: declared fields win, the rest pass through. */
+function applyLocalOverride(model: string, price: ModelPrice | undefined): ModelPrice | undefined {
+  const override = LOCAL_MODEL_OVERRIDES[model]
+  if (override === undefined) return price
+  return { ...price, ...override } as ModelPrice
 }
 
 /**
@@ -326,6 +362,21 @@ export class ModelCatalog {
   }
 
   async refreshMetadata(): Promise<void> {
+    // Stale-while-revalidate (issue #55): on a cold boot a slow-but-healthy
+    // models.dev (23s observed) outlives warm()'s window and never touches the
+    // failure fallback below — capability reads (reasoning efforts, limits,
+    // modalities) then see an empty map and the host rejects explicit efforts
+    // with UNSUPPORTED_REASONING_EFFORT. Load a fresh disk cache as the
+    // baseline FIRST, then let the online fetch replace it whenever it lands.
+    // Only the refresh-triggered path does this; start()'s first round is
+    // exactly that path, so cold boots are covered.
+    if (this.#cachePath && !this.#pricesReady) {
+      const cached = await loadMetadataCache(this.#cachePath, this.#now).catch(() => null)
+      if (cached && cached.size > 0) {
+        this.#prices = cached
+        this.#pricesReady = true
+      }
+    }
     try {
       const response = await withTimeout(this.#fetch(this.#metadataUrl, { headers: { accept: 'application/json' } }))
       if (!response.ok) throw new Error(`models.dev returned HTTP ${response.status}`)
@@ -338,7 +389,7 @@ export class ModelCatalog {
     } catch (err) {
       // Network failure with a cached copy is not fatal: load the cache.
       if (this.#cachePath && !this.#pricesReady) {
-        const cached = await loadMetadataCache(this.#cachePath).catch(() => null)
+        const cached = await loadMetadataCache(this.#cachePath, this.#now).catch(() => null)
         if (cached && cached.size > 0) {
           this.#prices = cached
           this.#pricesReady = true
@@ -369,6 +420,10 @@ export class ModelCatalog {
   }
 
   decision(model: string): AnonymousDecision {
+    // Issue #56: the live chat lane can never serve a blocklisted id (410
+    // delisted / 400 unavailable / 403 region) — deny before any metadata or
+    // S3 vouch, so a stale cache or the bootstrap list cannot resurrect it.
+    if (FREE_LANE_BLOCKLIST.has(model)) return { allowed: false, source: 'local_blocklist', known: true }
     const metadata = decide(model, this.#prices, this.#pricesReady)
     // The S3 vouch only covers ids metadata cannot speak for. A metadata
     // verdict of deprecated is Known, but S3 entries are compile-time verified
@@ -386,7 +441,7 @@ export class ModelCatalog {
 
   /** ids exposed to DSH: S1 ∩ allowed, or S3 while the live catalog is pending. */
   list(): string[] {
-    if (this.#zen.size === 0) return [...staticFreeModels]
+    if (this.#zen.size === 0) return staticFreeModels.filter((model) => !FREE_LANE_BLOCKLIST.has(model))
     const out: string[] = []
     for (const model of this.#zen) {
       if (this.decision(model).allowed) out.push(model)
@@ -401,7 +456,7 @@ export class ModelCatalog {
    * then keeps its own defaults.
    */
   limits(model: string): { contextWindow?: number; maxOutput?: number } | undefined {
-    const price = this.#prices.get(model)
+    const price = applyLocalOverride(model, this.#prices.get(model))
     if (!price) return undefined
     if (price.contextWindow === undefined && price.maxOutput === undefined) return undefined
     return {
@@ -417,7 +472,7 @@ export class ModelCatalog {
    * then keeps its own vision pattern (isVisionModel).
    */
   modalities(model: string): string[] | undefined {
-    const modalities = this.#prices.get(model)?.modalities
+    const modalities = applyLocalOverride(model, this.#prices.get(model))?.modalities
     return modalities === undefined ? undefined : [...modalities]
   }
 
@@ -428,7 +483,7 @@ export class ModelCatalog {
    * metadata cannot speak for the model (pending, or id absent).
    */
   reasoningCapability(model: string): { reasoning: boolean; effortValues: string[] } | undefined {
-    const price = this.#prices.get(model)
+    const price = applyLocalOverride(model, this.#prices.get(model))
     if (!price) return undefined
     return { reasoning: price.reasoning === true, effortValues: price.effortValues ?? [] }
   }
@@ -500,9 +555,9 @@ async function saveMetadataCache(path: string, prices: Map<string, ModelPrice>, 
   await rename(tmp, path)
 }
 
-async function loadMetadataCache(path: string): Promise<Map<string, ModelPrice>> {
+async function loadMetadataCache(path: string, now: () => number = Date.now): Promise<Map<string, ModelPrice>> {
   const raw = JSON.parse(await readFile(path, 'utf8')) as MetadataCache
-  if (Date.now() - raw.updatedAt > 7 * METADATA_REFRESH_MS) {
+  if (now() - raw.updatedAt > 7 * METADATA_REFRESH_MS) {
     throw new Error('models.dev cache too old')
   }
   return new Map(raw.prices)

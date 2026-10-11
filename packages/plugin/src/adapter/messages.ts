@@ -332,14 +332,31 @@ export async function toPiContext(options: HarnessGenerateOptions): Promise<PiCo
 }
 
 /**
- * The Zen anonymous free lane (live-probed 2026-09-18) rejects chat bodies
- * that do not carry an agent shape: HTTP 403 FreeTierError unless the body
- * streams (`stream: true`) and its `tools` array includes function tools
- * named "bash" AND "read" — descriptions, parameters and every header
- * (User-Agent included) go uninspected. pi-ai always streams, so the
- * chat-path gap is tools only: plain conversations carry none.
+ * The anonymous free-lane gate (~2026-10-09, issue #56; live-probed again
+ * 2026-10-11): a chat request passes with HTTP 200 only when ALL hold:
+ *   1. a canonical `ses_*` id in a session header (`x-opencode-session`,
+ *      `x-session-affinity` and `X-Session-Id` all work — any ONE suffices;
+ *      bad-shape ids 403);
+ *   2. a streaming body (`stream: true` — non-stream 403s);
+ *   3. an agent-shaped `tools` array: `bash`+`read` pass (200), `shell`+1
+ *      known name pass (200), but `bash` alone, `shell` alone, and 5 known
+ *      names WITHOUT bash/shell all 403. Schemas and descriptions go
+ *      uninspected.
+ * The `Bearer public` credential and the User-Agent spelling are NOT gates
+ * (both pass on /zen/v1; only /inference/openai 401s the Bearer). The shipped
+ * recipe stays the 2026-09-18 bash+read pair: minimal, host-named, and valid
+ * on both the /zen and /inference lanes.
  */
 export const FREE_LANE_GATE_TOOL_NAMES = ['bash', 'read'] as const
+
+/**
+ * Inbound tool-call names rewritten before the chunk stream leaves the
+ * adapter (zen-adapter.ts hands this to toStreamChunks). Empty on the shipped
+ * recipe: every injected stub is call-disabled or host-named, so nothing the
+ * model can call needs a rename. Kept as the seam for a future gate spelling
+ * that forces an alias (e.g. a mandatory `shell`).
+ */
+export const GATE_TOOL_ALIASES: Record<string, string> = {}
 
 export interface FreeLaneGateTool {
   type: 'function'

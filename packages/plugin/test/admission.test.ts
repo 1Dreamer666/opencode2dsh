@@ -15,10 +15,12 @@ import { admitCandidate, admitTrusted, coarseScreen } from '../src/pool/admissio
 function fakeTransport(script: Record<string, { status: number; body: string } | Error>) {
   const calls: string[] = []
   const bodies = new Map<string, string>()
+  const headers = new Map<string, Record<string, string>>()
   const agents: { uri: string }[] = []
   return {
     calls,
     bodies,
+    headers,
     agents,
     undici: {
       ProxyAgent: class {
@@ -28,9 +30,10 @@ function fakeTransport(script: Record<string, { status: number; body: string } |
         close() { return Promise.resolve() }
         destroy() { return Promise.resolve() }
       } as never,
-      request: (async (url: string, init?: { body?: string }) => {
+      request: (async (url: string, init?: { body?: string; headers?: Record<string, string> }) => {
         calls.push(url)
         if (typeof init?.body === 'string') bodies.set(url, init.body)
+        if (init?.headers) headers.set(url, init.headers)
         const entry = script[url] ?? script['*']
         if (entry instanceof Error) throw entry
         if (!entry) throw new Error(`unexpected request: ${url}`)
@@ -119,8 +122,8 @@ test('admission: fail-fast at each step (echo/geo/latency/models/smoke)', async 
   assert.ok(!result.admitted)
   assert.match(result.reason!, /zen smoke HTTP 403/)
 
-  // the smoke body must satisfy the free-lane agent-shape gate (2026-09-18):
-  // streaming + bash/read function tools, with the stubs call-disabled
+  // the smoke body must satisfy the free-lane gate (issue #56): streaming,
+  // bash+read stubs call-disabled, and a canonical ses_* session header
   const okTransport = fakeTransport(okScript())
   const okResult = await admitCandidate(deps(okTransport), { address: 'h:1', protocol: 'http', source: 'free' }, { timeoutMs: 1000 })
   assert.ok(okResult.admitted)
@@ -131,11 +134,10 @@ test('admission: fail-fast at each step (echo/geo/latency/models/smoke)', async 
   }
   assert.equal(smokeBody.stream, true)
   assert.equal(smokeBody.tool_choice, 'none')
-  assert.deepEqual(
-    smokeBody.tools?.map((t) => t.function.name).sort(),
-    ['bash', 'read'],
-    'smoke body carries the free-lane gate tools',
-  )
+  const smokeToolNames = smokeBody.tools?.map((t) => t.function.name) ?? []
+  assert.deepEqual([...smokeToolNames].sort(), ['bash', 'read'])
+  const smokeHeaders = okTransport.headers.get(CHAT_URL)!
+  assert.match(smokeHeaders['x-opencode-session'] ?? '', /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/, 'canonical session header')
 
   // transport errors surface as reasons (timeout / reset)
   transport = fakeTransport({ '*': new Error('connect ECONNREFUSED') })

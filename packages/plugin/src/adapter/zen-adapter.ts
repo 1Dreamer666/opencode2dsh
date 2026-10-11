@@ -5,7 +5,7 @@ import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses'
 import { ModelCatalog, ZEN_BASE_URL } from './catalog.ts'
 import { toStreamChunks, type HarnessChunk, type PiDoneMessage, type PiEvent } from './events.ts'
 import { deriveRequestIDs, disguiseHeaders } from './ids.ts'
-import { ensureFreeLaneShape, ensureResponsesFreeLaneShape, toPiContext, type HarnessGenerateOptions, type PiContext } from './messages.ts'
+import { ensureFreeLaneShape, ensureResponsesFreeLaneShape, GATE_TOOL_ALIASES, toPiContext, type HarnessGenerateOptions, type PiContext } from './messages.ts'
 import { apiForModel, isResponsesModel } from './routing.ts'
 export { apiForModel, isResponsesModel } from './routing.ts'
 import { routingContext, type RoutingContext } from '../pool/dispatcher.ts'
@@ -197,6 +197,12 @@ function terminalErrorEvent(errorMessage: string, model: Model<Api>): PiEvent {
  * on `POST /zen/v1/chat/completions` but 200 on `POST /zen/v1/responses`
  * (opencode #44659/#44847, DSH #3957). Route by model id; extend this list
  * if Zen moves more models (candidates: gpt-5.6-luna, grok-4.6).
+ *
+ * Issue #56 (2026-10-09): the gate added a canonical-session-header half on
+ * BOTH surfaces (adapter/messages.ts has the probed matrix); the official CLI
+ * v2 also calls /inference/openai directly for chat, but /zen/v1 stays the
+ * lane of record for this adapter — it answers 200 with the recipe and keeps
+ * `Bearer public` valid, which the inference surface 401s.
  */
 
 
@@ -227,7 +233,6 @@ export function isVisionModel(id: string, declaredModalities?: string[]): boolea
 }
 
 function toPiModel(id: string, reasoning: boolean, limits?: { contextWindow?: number; maxOutput?: number }, declaredModalities?: string[]): Model<Api> {
-  const isResponses = isResponsesModel(id)
   return {
     id,
     name: id,
@@ -636,13 +641,13 @@ export class ZenAdapter {
       // deadline timer is spent (pumpLive re-arms its own per pull)
       clearTimeout(deadlineTimer)
       if (preContentFailure === null && deliveredContent) {
-        yield* toStreamChunks(pumpLive(), model.contextWindow)
+        yield* toStreamChunks(pumpLive(), model.contextWindow, GATE_TOOL_ALIASES)
         return
       }
       if (preContentFailure === null && !deliveredContent) {
         // stream ended cleanly with no content and no error: pass through
         // (pi-ai's empty-response classification owns this case)
-        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), model.contextWindow)
+        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), model.contextWindow, GATE_TOOL_ALIASES)
         return
       }
       // Exit-shaped failure before content: ask the pool whether rotating is
@@ -673,7 +678,7 @@ export class ZenAdapter {
             break
           }
         }
-        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), model.contextWindow)
+        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), model.contextWindow, GATE_TOOL_ALIASES)
         return
       }
       // rotate: loop re-runs #eventsFor inside the same ALS store; the pool
