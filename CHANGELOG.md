@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Subscription URLs saved on the settings page now actually reach the runtime (live 2026-10-12). The card reported "saved" and the Host really did persist the URL, but the pool still assembled with zero subscription URLs — `/status` showed `subscriptions: null` (no fetcher was ever created), the source counter stayed at 0, and re-opening the page showed the field empty again. One cause, two symptoms: the resolved value has been through the schema, and `Schema.array()` hands an absent array an implicit `[]` even without `.default()`, so the legacy flat `subscriptions` key is *always* present and non-nullish — `raw.subscriptions ?? raw.subscription?.urls` therefore resolved to that empty array and discarded the canonical nested URLs. `resolveIpPoolSettings()` now prefers nested `subscription.urls` whenever it carries content and falls back to the legacy key only when it does not; the settings card's `servedSection()` applied the same shadowing rule when rendering, which is why a just-saved URL rendered as an empty list. Both regression tests feed the value through `IpPoolConfigSchema` first — a raw hand-written section has no flat key at all and cannot reproduce the bug, which is why the existing suite missed it.
+- Subscription pulls no longer send the hard-coded `clash-verge/1.6.0` User-Agent, which an airport can reject outright: one real airport answers `502 Bad Gateway` for `1.6.0` while serving normally for `clash-verge/v2.0`. The UA is now the settings field `ipPool.subscription.userAgent` (settings-page input, applied live on save — no restart), defaulting to `clash-verge/v2.0`; a blank value falls back to that default rather than sending no UA. Airports commonly allow-list the UA and some choose the returned format from it (Clash-shaped → `proxies:` YAML, v2ray-shaped → base64 links), so the value is now tunable without waiting for a plugin release. `SubscriptionFetcher` gained `setUserAgent()`, and the default lives in exactly one place — `DEFAULT_SUBSCRIPTION_USER_AGENT` in `src/pool/subscription.ts` — so the schema default, the runtime fallback and the client-side mirror cannot drift.
+
 ## 0.3.11 (2026-10-11)
 
 ### Fixed

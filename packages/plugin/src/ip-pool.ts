@@ -241,6 +241,9 @@ export async function startIpPool(
     const fetcher = ensureSubscriptions(urls)
     if (fetcher !== null) {
       fetcher.setIntervalMs(current.subscription?.refreshMs ?? 30 * 60_000)
+      // Applied before start() so the very first refresh already carries the
+      // configured UA (airports gate on it — an unlisted one answers 502).
+      fetcher.setUserAgent(current.subscription?.userAgent)
       if (fetcher === subscriptions && !fetcherActive) {
         fetcher.start()
         fetcherActive = true

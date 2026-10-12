@@ -25,6 +25,8 @@
 
 import Schema from '@deepseek-ai/schemastery'
 
+import { DEFAULT_SUBSCRIPTION_USER_AGENT } from '../pool/subscription.ts'
+
 /**
  * Settings namespace owned by this plugin: the Loader entry id declared by
  * `cordis.patch.yml`. Mirrored by `SETTINGS_NAMESPACE` in src/client/index.ts.
@@ -80,13 +82,25 @@ export const IpPoolConfigSchema = Schema.object({
   }),
   /** Manually added plain proxies: 'http://h:p' or 'socks5://h:p' (§1.2 source 2). */
   manual: Schema.array(Schema.string()).default([]),
-  /** Previous patch spelling; no default so nested settings can take over. */
+  /**
+   * Previous patch spelling. A plain (default-less) array field here does NOT
+   * stay undefined the way this comment once assumed: `Schema.array()` resolves
+   * an absent array to `[]`, so the field is always present in a served value.
+   * `resolveIpPoolSettings()` therefore prefers nested `subscription.urls` and
+   * only falls back to this key when that one is empty.
+   */
   subscriptions: Schema.array(Schema.string()),
   subscription: Schema.object({
     /** Airport/self-hosted subscription URLs (display-redacted client-side, §5.1). */
     urls: Schema.array(Schema.string()).default([]),
     /** Subscription refresh interval (§4.6, one request per URL per refresh). */
     refreshMs: Schema.number().min(60_000).max(24 * 60 * 60_000).step(1).default(30 * 60_000),
+    /**
+     * Fetch User-Agent for subscription URLs (§4.6). Airports gate on it and
+     * some pick the returned format from it, so it stays user-editable without
+     * a plugin release. Empty = the built-in default.
+     */
+    userAgent: Schema.string().default(DEFAULT_SUBSCRIPTION_USER_AGENT),
   }),
   singbox: Schema.object({
     /** sing-box binary: PATH name or absolute path; empty parks encrypted nodes. */
@@ -109,7 +123,7 @@ export interface IpPoolSettings {
   maxConcurrentProbes: number
   free: { enabled: boolean; targetSize: number; blockedCountries: string[] }
   manual: string[]
-  subscription: { urls: string[]; refreshMs: number }
+  subscription: { urls: string[]; refreshMs: number; userAgent: string }
   singbox: { path: string }
   pinnedExitId: string
   pinnedStrict: boolean
@@ -159,7 +173,18 @@ export interface AnyIpPoolSection {
  */
 export function resolveIpPoolSettings(value: AnyIpPoolSection | undefined): IpPoolSettings {
   const raw = value ?? {}
-  const urls = raw.subscriptions ?? raw.subscription?.urls ?? []
+  // Subscription URLs live under the canonical nested `subscription.urls`; the
+  // flat `subscriptions` key is the PREVIOUS patch spelling, kept only for
+  // older compositions. It cannot be tested with `??`: a resolved value has
+  // already been through the schema, and `Schema.array()` gives an ARRAY an
+  // implicit `[]` even without `.default()` — so `subscriptions` is never
+  // nullish, and a `??` chain lets that empty array shadow every URL the
+  // settings page writes. The pool then assembles with zero subscription URLs
+  // and never creates the fetcher at all. Prefer the nested spelling whenever
+  // it carries content; fall back to the legacy key only when it does not.
+  const nestedUrls = raw.subscription?.urls ?? []
+  const legacyUrls = raw.subscriptions ?? []
+  const urls = nestedUrls.length > 0 ? nestedUrls : legacyUrls
   return {
     enabled: raw.enabled ?? false,
     probeModels: raw.probeModels ?? [],
@@ -173,6 +198,7 @@ export function resolveIpPoolSettings(value: AnyIpPoolSection | undefined): IpPo
     subscription: {
       urls,
       refreshMs: raw.subscription?.refreshMs ?? 30 * 60_000,
+      userAgent: raw.subscription?.userAgent ?? DEFAULT_SUBSCRIPTION_USER_AGENT,
     },
     singbox: { path: raw.singbox?.path ?? 'sing-box' },
     pinnedExitId: raw.pinnedExitId ?? '',
@@ -195,7 +221,7 @@ export function toIpPoolConfig(value: IpPoolSettings): {
   proxyHosts: string[]
   free: { enabled: boolean; targetSize: number; blockedCountries: string[] }
   subscriptions: string[]
-  subscription: { refreshMs: number }
+  subscription: { refreshMs: number; userAgent: string }
   singbox: { path: string }
   probeModels: string[]
   maxConcurrentProbes: number
@@ -213,7 +239,7 @@ export function toIpPoolConfig(value: IpPoolSettings): {
       blockedCountries: value.free.blockedCountries,
     },
     subscriptions: value.subscription.urls,
-    subscription: { refreshMs: value.subscription.refreshMs },
+    subscription: { refreshMs: value.subscription.refreshMs, userAgent: value.subscription.userAgent },
     singbox: { path: value.singbox.path },
     probeModels: resolveProbeModels(value.probeModels),
     maxConcurrentProbes: value.maxConcurrentProbes,

@@ -10,13 +10,31 @@
  * Deliberately gentle: subscription servers are paid account resources
  * (ban risk), so one request per URL per refresh — no retries, no fan-out
  * (docs 4.1: subscription never goes hot).
+ *
+ * The fetch User-Agent is settings-driven (docs 5.1 `subscription.userAgent`,
+ * default DEFAULT_SUBSCRIPTION_USER_AGENT): airports gate on it and a UA their
+ * panel does not list can come back as an error page or a 502 rather than a
+ * subscription body — one airport measured here answers 502 for
+ * `clash-verge/1.6.0` and serves normally for `clash-verge/v2.0`.
  */
 
 import { ExitPool, type ExitNode } from './pool.ts'
 import { Prober, type ProbeTask } from './prober.ts'
 import { admitCandidate, admitTrusted, type AdmissionDeps } from './admission.ts'
-import { parseSubscription, type ParsedNode } from './subscription.ts'
+import { parseSubscription, type ParsedNode, DEFAULT_SUBSCRIPTION_USER_AGENT } from './subscription.ts'
 import { SingBoxSupervisor, type ConvertedExit } from './singbox.ts'
+
+/**
+ * The fetch UA the settings layer and the runtime both default to; re-exported
+ * so callers wiring the fetcher need not reach into the parser module.
+ */
+export { DEFAULT_SUBSCRIPTION_USER_AGENT }
+
+/** Empty/whitespace means "use the default", never "send no User-Agent". */
+function normalizeUserAgent(userAgent: string | undefined): string {
+  const trimmed = (userAgent ?? '').trim()
+  return trimmed === '' ? DEFAULT_SUBSCRIPTION_USER_AGENT : trimmed
+}
 
 export interface SubscriptionDeps extends AdmissionDeps {
   pool: ExitPool
@@ -45,6 +63,13 @@ export interface SubscriptionOptions {
   /** Refresh interval (docs 4.6, default 30min). */
   intervalMs?: number
   timeoutMs?: number
+  /**
+   * User-Agent for subscription fetches (docs 5.1 `subscription.userAgent`).
+   * Airports gate on this — an unlisted UA returns an error page instead of a
+   * body, and may also select the returned format. Empty/unset falls back to
+   * DEFAULT_SUBSCRIPTION_USER_AGENT.
+   */
+  userAgent?: string
   logger?: { info(message: string): void; warn(message: string): void }
 }
 
@@ -63,12 +88,14 @@ export class SubscriptionFetcher {
   #stopped = false
   #intervalMs: number
   #timeoutMs: number
+  #userAgent: string
   #logger?: SubscriptionOptions['logger']
 
   constructor(deps: SubscriptionDeps, options: SubscriptionOptions = {}) {
     this.#deps = deps
     this.#intervalMs = options.intervalMs ?? 30 * 60_000
     this.#timeoutMs = options.timeoutMs ?? 30_000
+    this.#userAgent = normalizeUserAgent(options.userAgent)
     this.#logger = options.logger
   }
 
@@ -94,6 +121,20 @@ export class SubscriptionFetcher {
       this.#timer = setInterval(() => void this.refresh(), this.#intervalMs)
       this.#timer.unref?.()
     }
+  }
+
+  /**
+   * Live re-apply of the fetch User-Agent (settings page, docs §5.1). Takes
+   * effect on the next refresh — the in-flight round keeps the UA it started
+   * with. Empty falls back to the default rather than sending no UA at all.
+   */
+  setUserAgent(userAgent: string | undefined): void {
+    this.#userAgent = normalizeUserAgent(userAgent)
+  }
+
+  /** The UA the next fetch will send (settings card echo / diagnostics). */
+  get userAgent(): string {
+    return this.#userAgent
   }
 
   /** Manual refresh trigger (settings page 立即刷新, docs §5.3 /probe scope: 'refill' parity). */
@@ -222,7 +263,7 @@ export class SubscriptionFetcher {
     try {
       const response = await (this.#deps.fetchImpl ?? fetch)(url, {
         signal: controller.signal,
-        headers: { accept: '*/*', 'user-agent': 'clash-verge/1.6.0' },
+        headers: { accept: '*/*', 'user-agent': this.#userAgent },
       })
       if (!response.ok) throw new Error(`subscription HTTP ${response.status}`)
       return await response.text()
