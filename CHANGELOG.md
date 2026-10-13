@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The model picker now refreshes when the live catalog or its capabilities change, including a Zen response arriving after the 4-second startup window (#59). Failed cold fetches expose an empty catalog with `error` status; a failed refresh of a populated catalog retains its last roster with `stale` status.
+- The subscription Refresh now button now drives `scope: 'subscriptions'` (#63), waits for an ongoing round, and shows progress and upstream errors. Clearing URLs or disabling the pool stops the old fetcher. The configurable subscription User-Agent default is shared by host and browser.
+- Upstream `403 FreeTierError` now retains its client restriction explanation as `FREE_TIER_RESTRICTED` instead of appearing as an invalid API key (#62). This failure remains non-retryable.
+- Saved subscription URLs reach the runtime and remain visible when reopening settings (#60). Host and client share nested/legacy URL resolution, handling schema-injected empty arrays without hiding the saved value.
+- Subscription User-Agent is configurable through `ipPool.subscription.userAgent`, applied on the next refresh. Empty values restore `clash-verge/v2.0`; the host and browser share one default and normalization rule (#60).
+
 ## 0.3.11 (2026-10-11)
 
 ### Fixed

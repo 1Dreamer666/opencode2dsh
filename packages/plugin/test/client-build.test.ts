@@ -89,6 +89,25 @@ test('client externals stay inside the host platform table', () => {
   }
 })
 
+test('subscription refresh button drives its own bridge lane, not the free-source one', () => {
+  const stripped = code(bundle())
+  // 立即刷新 and 立即补充 are different actions: refill pulls the public
+  // free-proxy sources, subscriptions re-fetches the configured subscription
+  // URLs. The card shipped both buttons wired to { scope: 'refill' }, which
+  // left `refreshSubscriptions()` unreachable and made 立即刷新 a no-op.
+  // Pin the two scopes on the built artifact so the lanes cannot silently
+  // collapse back into one. (The bundler re-quotes string literals, so match
+  // on the scope value rather than on its quoting.)
+  const scopeLiteral = (name: string): RegExp => new RegExp(`scope:\\s*['"]${name}['"]`)
+  assert.match(stripped, scopeLiteral('subscriptions'), '立即刷新 sends the subscriptions scope')
+  assert.match(stripped, scopeLiteral('refill'), '立即补充 keeps sending the refill scope')
+  assert.doesNotMatch(
+    stripped,
+    /refresh-subscriptions[\s\S]{0,240}?scope:\s*['"]refill['"]/,
+    '立即刷新 must not send the free-source refill scope',
+  )
+})
+
 test('client manifest is declared in package.json', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.ok(pkg.dsh?.client, 'dsh.client manifest missing')

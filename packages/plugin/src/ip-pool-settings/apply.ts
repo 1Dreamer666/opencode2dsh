@@ -142,6 +142,7 @@ export function applyIpPoolSettings(
       const handlers = makeBridgeHandlers(
         () => controller.runtime,
         () => ({
+          enabled: controller.settings().enabled,
           pinnedStrict: controller.settings().pinnedStrict,
           proxyHosts: controller.runtime?.installer && controller.settings().proxyHosts.length > 0
             ? controller.settings().proxyHosts
