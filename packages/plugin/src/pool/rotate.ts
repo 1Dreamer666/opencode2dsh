@@ -83,13 +83,21 @@ export function createRotateDelegate(pool: ExitPool, options: { maxAttempts?: nu
   const maxAttempts = options.maxAttempts ?? 3
   return {
     decide(failure, model, session, attempt, deterministic = false) {
+      // The exit this turn was pinned to (the one that just failed).
+      const failedExit = pool.exitOfSession(session)
       // Deterministic refusal (RegionError): ban the sticky exit's pairing
       // immediately — the dispatcher layer recorded the refusal but cannot
       // see the body; the adapter's classify knows it on sight (docs 4.2).
-      if (deterministic) {
-        const failedExit = pool.exitOfSession(session)
-        if (failedExit !== null) pool.markModelBanned(failedExit, model)
+      if (deterministic && failedExit !== null) {
+        pool.markModelBanned(failedExit, model)
       }
+      // Exclude the exit that just failed THIS turn, however it failed. A first
+      // 403 is only 'suspect' (the ban needs a second sample) and a 5xx
+      // deliberately does not strike the exit dead, so either left the exit
+      // fully usable and the restarted stream re-picked it
+      // (measured: `sub-0 -> sub-0 -> sub-5`), spending a rotate attempt on a
+      // known-bad exit instead of trying a different one.
+      if (failedExit !== null) pool.avoid(failedExit)
       if (attempt > maxAttempts) return false
       // Anything usable for this model left? (pick filters cooldowns, bans,
       // dead.) Nothing usable -> let the error surface honestly.

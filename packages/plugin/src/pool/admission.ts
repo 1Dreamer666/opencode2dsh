@@ -176,6 +176,22 @@ export interface AdmissionResult {
    * periodic probe retries when the cooldown expires.
    */
   limited?: boolean
+  /**
+   * Steps 1+2 facts measured on this attempt, returned even when a LATER step
+   * rejected the candidate. Previously they died with the failure and the
+   * trusted path fell back to placeholders (live-measured 2026-10-13: an exit
+   * whose echo answered `203.0.113.9 / JP Tokyo` was stored as
+   * `exitIP: '' / latencyMs: 0`), which the pool then ranked as the fastest
+   * healthy node in the table.
+   */
+  facts?: EchoFacts
+  /**
+   * Admitted WITHOUT clearing the full chain (the trusted/pinned fallback).
+   * The address keeps its pool slot so a later probe can revisit it, but its
+   * health is UNKNOWN — callers must not markOk it, or a node that never
+   * answered anything outranks exits that demonstrably work.
+   */
+  degraded?: boolean
 }
 
 export async function admitCandidate(
@@ -240,7 +256,10 @@ export async function admitCandidate(
       headers: { authorization: 'Bearer public', 'user-agent': opencodeUserAgent(), 'x-opencode-client': 'cli', accept: 'application/json', ...probeHeaders },
     })
     if (models.statusCode !== 200) {
-      return { admitted: false, reason: `zen models HTTP ${models.statusCode}` }
+      // facts ride along: steps 1+2 succeeded, so the exit IP and latency are
+      // REAL even though the tunnel step refused. Dropping them here is what
+      // made the trusted fallback store placeholders (see AdmissionResult.facts).
+      return { admitted: false, reason: `zen models HTTP ${models.statusCode}`, facts }
     }
 
     // Step 4: anonymous-lane smoke (streaming, 1 token). The free lane
@@ -294,7 +313,7 @@ export async function admitCandidate(
           },
         }
       }
-      return { admitted: false, reason: `zen smoke HTTP ${smoke.statusCode}` }
+      return { admitted: false, reason: `zen smoke HTTP ${smoke.statusCode}`, facts }
     }
 
     return {
@@ -321,7 +340,16 @@ export async function admitCandidate(
 /** Admit a trusted-source candidate (manual/subscription/goproxy): smoke
  *  only; failure warns instead of rejecting for pinned (docs 4.5). Existing
  *  pool facts are PRESERVED on the failure fallback — a failed smoke wipes
- *  neither a previously measured exitIP/latency nor the routing key. */
+ *  neither a previously measured exitIP/latency nor the routing key.
+ *
+ *  The fallback node is flagged `degraded`: the caller keeps the address in
+ *  the table (so a later probe can revisit it) but must NOT markOk it. Live
+ *  regression this guards (2026-10-13): sing-box had converted 0 of 470
+ *  subscription nodes, every smoke failed, and the fallback stamped each node
+ *  `exitIP: '' / latencyMs: 0 / quality: 'S'`; the caller then markOk'd them,
+ *  so 30 never-answering exits outranked all 6 healthy free exits and took
+ *  600/600 picks. Unknown latency is 0 and sorts LAST (pool.pick), and an
+ *  unmeasured node is 'C', never the top grade. */
 export async function admitTrusted(
   deps: AdmissionDeps,
   candidate: { address: string; protocol: 'http' | 'socks5'; source: 'manual' | 'subscription' | 'goproxy' },
@@ -329,21 +357,29 @@ export async function admitTrusted(
 ): Promise<AdmissionResult> {
   const result = await admitCandidate(deps, candidate, { pinned: options.pinned })
   if (result.admitted) return result
-  // Trusted candidates: keep the node (the address is the routing key
-  // fallback, 3.1), warn, and let periodic probing revisit.
-  deps.logger?.warn(`opencode2dsh: trusted exit ${candidate.address} failed admission (${result.reason}); admitted with ${options.previous?.exitIP ? 'previous' : 'unknown'} exit facts`)
-  const previous = options.previous
+  // Prefer what THIS attempt measured (steps 1+2 may have succeeded before a
+  // later step refused); fall back to the pool's previously stored facts.
+  const facts = result.facts ?? options.previous
+  const latencyMs = facts?.latencyMs ?? 0
+  deps.logger?.warn(
+    `opencode2dsh: trusted exit ${candidate.address} failed admission (${result.reason}); kept as degraded with ${facts?.exitIP ? 'measured' : 'unknown'} exit facts`,
+  )
   return {
     admitted: true,
+    degraded: true,
+    reason: result.reason,
+    facts: result.facts,
     node: {
       id: candidate.address,
       protocol: candidate.protocol,
       source: candidate.source,
       pinned: options.pinned ?? false,
-      exitIP: previous?.exitIP ?? '',
-      exitLocation: previous?.exitLocation ?? '',
-      latencyMs: previous?.latencyMs ?? 0,
-      quality: previous?.quality ?? gradeOf(previous?.latencyMs ?? 0),
+      exitIP: facts?.exitIP ?? '',
+      exitLocation: facts?.exitLocation ?? '',
+      latencyMs,
+      // An unmeasured node is the worst grade, not the best: gradeOf(0) would
+      // hand it 'S' and put it ahead of every exit that was actually measured.
+      quality: latencyMs > 0 ? (options.previous?.quality ?? gradeOf(latencyMs)) : 'C',
       addedAt: Date.now(),
     },
   }

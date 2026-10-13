@@ -223,7 +223,10 @@ export class SubscriptionFetcher {
               })
               if (!this.#stopped && verdict.admitted && verdict.node) {
                 if (this.#deps.pool.add(verdict.node)) {
-                  this.#deps.pool.markOk(verdict.node.id)
+                  // A node that only entered through the degraded fallback (its
+                  // smoke never succeeded) stays 'unknown': markOk here is what
+                  // let never-answering exits outrank healthy ones in pick().
+                  if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
                   this.#state.convertedAdmitted += 1
                   const served = exit.node
                   this.#state.pendingConversion = this.#state.pendingConversion.filter(
@@ -258,7 +261,7 @@ export class SubscriptionFetcher {
           })
           if (!this.#stopped && verdict.admitted && verdict.node) {
             if (this.#deps.pool.add(verdict.node)) {
-              this.#deps.pool.markOk(verdict.node.id)
+              if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
               this.#state.plaintextAdmitted += 1
             }
           }

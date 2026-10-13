@@ -294,8 +294,12 @@ export async function startIpPool(
           if (verdict.admitted && verdict.node) {
             // Refresh the node's facts (admission re-measured them).
             pool.add({ ...entry, ...verdict.node, pinned: entry.pinned })
+            // A degraded verdict means the probe never verified this exit:
+            // markOk would promote it to 'ok' on no evidence (the 2026-10-13
+            // regression). Leave the health alone so it stays excluded from the
+            // front of the rotation until a probe genuinely passes.
             if (verdict.limited) pool.markLimited(entry.id)
-            else pool.markOk(entry.id, model)
+            else if (!verdict.degraded) pool.markOk(entry.id, model)
           } else {
             pool.markDeadStrike(entry.id)
             break
@@ -325,8 +329,9 @@ export async function startIpPool(
           }, { pinned: entry.pinned, previous: { exitIP: entry.exitIP, exitLocation: entry.exitLocation, latencyMs: entry.latencyMs, quality: entry.quality } })
         if (verdict.admitted && verdict.node) {
           pool.add({ ...entry, ...verdict.node, pinned: entry.pinned })
+          // Same rule as probeAll: only a verified probe may promote an exit.
           if (verdict.limited) pool.markLimited(entry.id)
-          else pool.markOk(entry.id, model)
+          else if (!verdict.degraded) pool.markOk(entry.id, model)
         } else {
           pool.markDeadStrike(entry.id)
           break

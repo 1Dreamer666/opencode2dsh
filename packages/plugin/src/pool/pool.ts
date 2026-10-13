@@ -67,6 +67,8 @@ export interface PoolOptions {
   modelBanConfirmations?: number
   /** Dead exits are evicted after this many probe strikes (free source only). */
   deadEvictions?: number
+  /** How long a session avoids the exit that just failed it (rotate escape). */
+  avoidMs?: number
   now?: () => number
 }
 
@@ -78,12 +80,24 @@ export function gradeOf(latencyMs: number): ExitNode['quality'] {
   return 'C'
 }
 
+/**
+ * Sort key for latency. `0` means "never measured" (a trusted-conversion
+ * fallback, or a manual entry before its first probe), NOT "instantaneously
+ * fast". Treating it as a real measurement put unverified exits ahead of every
+ * exit that had actually answered, so it sorts last instead.
+ */
+function latencyRank(latencyMs: number): number {
+  return latencyMs > 0 ? latencyMs : Number.POSITIVE_INFINITY
+}
+
 const banKey = (exitId: string, model: string) => `${exitId}\u0000${model}`
 
 export class ExitPool {
   readonly #nodes = new Map<string, ExitNode>()
   readonly #health = new Map<string, ExitHealth>()
   readonly #bans = new Map<string, ModelBan>()
+  /** exitId -> its ban records, so per-exit lookups never scan all bans. */
+  readonly #bansByExit = new Map<string, Map<string, ModelBan>>()
   readonly #sessionExit = new Map<string, string>()
   /** Passive-signal counters per exit (docs/ip-pool.md §4.3 被动 + IP-6 stats). */
   readonly #passive = new Map<string, { ok: number; limited: number; refused: number; dead: number; transport: number }>()
@@ -92,6 +106,9 @@ export class ExitPool {
   #cooldownMax: number
   #banConfirmations: number
   #deadEvictions: number
+  #avoidMs: number
+  /** exitId -> epoch ms until which a rotate loop should skip it (§3.4). */
+  readonly #avoidUntil = new Map<string, number>()
   #now: () => number
 
   constructor(options: PoolOptions = {}) {
@@ -100,6 +117,7 @@ export class ExitPool {
     this.#cooldownMax = options.limitedCooldownMaxMs ?? 30 * 60_000
     this.#banConfirmations = options.modelBanConfirmations ?? 2
     this.#deadEvictions = options.deadEvictions ?? 2
+    this.#avoidMs = options.avoidMs ?? 30_000
     this.#now = options.now ?? Date.now
   }
 
@@ -154,13 +172,27 @@ export class ExitPool {
     this.#nodes.delete(id)
     this.#health.delete(id)
     this.#passive.delete(id)
-    for (const key of this.#bans.keys()) {
-      if (key.startsWith(`${id}\u0000`)) this.#bans.delete(key)
+    this.#avoidUntil.delete(id)
+    const nodeBans = this.#bansByExit.get(id)
+    if (nodeBans !== undefined) {
+      for (const model of nodeBans.keys()) this.#bans.delete(banKey(id, model))
+      this.#bansByExit.delete(id)
     }
     for (const [session, exitId] of this.#sessionExit) {
       if (exitId === id) this.#sessionExit.delete(session)
     }
     this.#clearPinnedIf(id)
+  }
+
+  /** Single write path for ban records, keeping the per-exit index in sync. */
+  #setBan(id: string, model: string, ban: ModelBan): void {
+    this.#bans.set(banKey(id, model), ban)
+    let nodeBans = this.#bansByExit.get(id)
+    if (nodeBans === undefined) {
+      nodeBans = new Map<string, ModelBan>()
+      this.#bansByExit.set(id, nodeBans)
+    }
+    nodeBans.set(model, ban)
   }
 
   /** Disable without dropping (dead manual/subscription/goproxy nodes, 3.5). */
@@ -215,7 +247,7 @@ export class ExitPool {
       health.deadStrikes = 0
     }
     if (model !== undefined) {
-      this.#bans.set(banKey(id, model), { state: 'ok', bannedAt: 0, consecutiveFailures: 0 })
+      this.#setBan(id, model, { state: 'ok', bannedAt: 0, consecutiveFailures: 0 })
     }
   }
 
@@ -236,13 +268,12 @@ export class ExitPool {
   /** Deterministic refusal (upstream RegionError: region blocks are a
    *  property of the exit, not transient noise) — ban the pairing at once. */
   markModelBanned(id: string, model: string): void {
-    this.#bans.set(banKey(id, model), { state: 'banned', bannedAt: this.#now(), consecutiveFailures: this.#banConfirmations })
+    this.#setBan(id, model, { state: 'banned', bannedAt: this.#now(), consecutiveFailures: this.#banConfirmations })
   }
 
   /** 401/403: model-level suspicion; banned after N consecutive (3.2). */
   markModelSignal(id: string, model: string): BanState {
-    const key = banKey(id, model)
-    const current = this.#bans.get(key) ?? { state: 'ok' as BanState, bannedAt: 0, consecutiveFailures: 0 }
+    const current = this.#bans.get(banKey(id, model)) ?? { state: 'ok' as BanState, bannedAt: 0, consecutiveFailures: 0 }
     current.consecutiveFailures += 1
     if (current.consecutiveFailures >= this.#banConfirmations && current.state !== 'banned') {
       current.state = 'banned'
@@ -250,7 +281,7 @@ export class ExitPool {
     } else if (current.state !== 'banned') {
       current.state = 'suspect'
     }
-    this.#bans.set(key, current)
+    this.#setBan(id, model, current)
     return current.state
   }
 
@@ -363,6 +394,27 @@ export class ExitPool {
   }
 
   /**
+   * Mark an exit as "just failed this request" so the rotate loop in the same
+   * user turn moves on. A 403 whose ban still needs a second sample, and a 5xx
+   * (which deliberately does not strike the exit dead), both leave
+   * `isUsable()` true — without this the restarted stream re-picked the very
+   * exit that had just failed it (measured: `sub-0 -> sub-0 -> sub-5`).
+   */
+  avoid(id: string): void {
+    if (!this.#nodes.has(id)) return
+    this.#avoidUntil.set(id, this.#now() + this.#avoidMs)
+  }
+
+  /** Exits currently in a rotate-avoid window. */
+  #avoiding(id: string): boolean {
+    const until = this.#avoidUntil.get(id)
+    if (until === undefined) return false
+    if (until > this.#now()) return true
+    this.#avoidUntil.delete(id)
+    return false
+  }
+
+  /**
    * Pick the exit for one upstream request. Pinned wins while usable (3.6);
    * the rotation pool then prefers session stickiness, health, fewer
    * cooldowns and lower latency with a same-tier shuffle. Pure; no IO.
@@ -371,13 +423,18 @@ export class ExitPool {
     if (this.pinnedId !== '' && this.isUsable(this.pinnedId, model)) return this.pinnedId
 
     const last = this.#sessionExit.get(session)
-    if (last !== undefined && this.isUsable(last, model)) return last
+    if (last !== undefined && this.isUsable(last, model) && !this.#avoiding(last)) return last
 
     const usable = [...this.#nodes.keys()].filter((id) => this.isUsable(id, model))
     if (usable.length === 0) return null
+    // Prefer exits outside the rotate-avoid window; when EVERY candidate is
+    // avoiding (a single-exit pool mid-rotation) fall back to the full set
+    // rather than returning null and silently going direct.
+    const preferred = usable.filter((id) => !this.#avoiding(id))
+    const candidates = preferred.length > 0 ? preferred : usable
     const health = (id: string) => this.#health.get(id)!
     const node = (id: string) => this.#nodes.get(id)!
-    usable.sort((left, right) => {
+    candidates.sort((left, right) => {
       const a = health(left)
       const b = health(right)
       const stateRank = (h: ExitHealth) => (h.state === 'ok' ? 0 : 1)
@@ -385,11 +442,11 @@ export class ExitPool {
       if (byState !== 0) return byState
       const byLimited = a.consecutiveLimited - b.consecutiveLimited
       if (byLimited !== 0) return byLimited
-      const byLatency = node(left).latencyMs - node(right).latencyMs
+      const byLatency = latencyRank(node(left).latencyMs) - latencyRank(node(right).latencyMs)
       if (byLatency !== 0) return byLatency
       return Math.random() < 0.5 ? -1 : 1
     })
-    const chosen = usable[0]
+    const chosen = candidates[0]
     if (chosen === undefined) return null
     this.#sessionExit.set(session, chosen)
     return chosen
@@ -411,19 +468,21 @@ export class ExitPool {
     if (!health || health.state === 'dead') return false
     if (health.cooldownUntil > this.#now()) return false
     // A node with at least one banned pairing and no healthy pairing for any
-    // model it serves is effectively exhausted. Track by distinct models:
-    const nodeModels = new Set<string>()
+    // model it serves is effectively exhausted. Track by distinct models.
+    // Indexed by exit: the previous form walked every ban for every node, so
+    // state()/admissionQuota() were O(nodes x bans) on each refill tick — with
+    // a subscription pool (470 exits, one ban key per probed model) that ran on
+    // every state read.
+    const nodeBans = this.#bansByExit.get(id)
+    if (nodeBans === undefined || nodeBans.size === 0) return true
     let allBanned = true
-    let sawBan = false
-    for (const [key, ban] of this.#bans) {
-      if (!key.startsWith(`${id}\u0000`)) continue
-      const model = key.slice(id.length + 1)
-      nodeModels.add(model)
-      if (ban.state !== 'banned') allBanned = false
-      else sawBan = true
+    for (const ban of nodeBans.values()) {
+      if (ban.state !== 'banned') {
+        allBanned = false
+        break
+      }
     }
-    if (sawBan && nodeModels.size > 0 && allBanned) return false
-    return true
+    return !allBanned
   }
 
   /** Count usable free-source nodes toward the refill thresholds. */
