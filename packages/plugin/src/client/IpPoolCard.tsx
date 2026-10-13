@@ -703,8 +703,8 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
     failed: error !== null,
   }
 
-  /** One bridge action (/probe). */
-  const bridgeAction = async (body: { scope: 'all' | 'refill' } | { scope: 'exit'; exitId: string }): Promise<void> => {
+  /** One bridge action (/probe): probe lanes, or the subscription refresh. */
+  const bridgeAction = async (body: { scope: 'all' | 'refill' | 'subscriptions' } | { scope: 'exit'; exitId: string }): Promise<void> => {
     setActionBusy(true)
     try {
       await fetch(`${BRIDGE_PREFIX}/probe`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -849,8 +849,8 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
               type="button"
               className={styles.ghostButton}
               data-testid="refresh-subscriptions"
-              disabled={actionBusy || !form.enabled}
-              onClick={() => { void bridgeAction({ scope: 'refill' }) }}
+              disabled={actionBusy || !form.enabled || form.subscriptionUrls.length === 0}
+              onClick={() => { void bridgeAction({ scope: 'subscriptions' }) }}
             >
               {t('subscriptionRefreshNow')}
             </button>

@@ -247,6 +247,9 @@ export type BridgeResult = { ok: true; value: unknown } | { ok: false; code: str
 /** deps over the live runtime + the current settings value (probe model etc.). */
 export interface BridgeHandlers {
   status(): Promise<BridgeResult>
+  /** Probe/refresh actions (docs §5.3): `all` = probe every exit, `exit` = probe
+   *  one, `refill` = one free-source refill round, `subscriptions` = one
+   *  subscription fetch+convert round (the card's 立即刷新). */
   probe(body: { scope?: unknown; exitId?: unknown }): Promise<BridgeResult>
   /** Selectable probe models (docs §5.2 探活模型 dropdown): S3 static list
    *  first, then the live Zen catalog entries the runtime resolved. */
@@ -282,13 +285,24 @@ export function makeBridgeHandlers(
         await rt.refillNow()
         return { ok: true, value: { refilled: true } }
       }
+      // The subscription lane the settings card's 立即刷新 button drives. It is
+      // deliberately distinct from 'refill', which pulls the public free-proxy
+      // sources: this one re-fetches ONLY the configured subscription URLs and
+      // converts their encrypted nodes through sing-box (docs §5.2).
+      if (scope === 'subscriptions') {
+        if (rt.subscriptions === null) {
+          return { ok: false, code: 'no-subscriptions', message: 'no subscription URLs are configured' }
+        }
+        await rt.refreshSubscriptions()
+        return { ok: true, value: { refreshed: true, urlCount: rt.subscriptions.urlCount } }
+      }
       if (scope === 'exit') {
         const exitId = typeof body.exitId === 'string' ? body.exitId : ''
         if (!rt.pool.has(exitId)) return { ok: false, code: 'unknown-exit', message: `exit "${exitId}" is not in the pool` }
         const count = await rt.probeExit(exitId)
         return { ok: true, value: { queued: count } }
       }
-      return { ok: false, code: 'settings-rejected', message: "probe scope must be 'all', 'exit' or 'refill'" }
+      return { ok: false, code: 'settings-rejected', message: "probe scope must be 'all', 'exit', 'refill' or 'subscriptions'" }
     },
     async models() {
       const { staticFreeModels } = await import('../adapter/catalog.ts')
