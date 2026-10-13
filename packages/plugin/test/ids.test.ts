@@ -122,9 +122,12 @@ test('the synthesized session is stable per conversation but the clock is real (
   const second = canonicalSessionID('conversation A')
   assert.equal(first, second, 'the same conversation reuses one session id')
 
-  // Distinct conversations must not collide.
+  // Distinct conversations must not collide. The clock half can legitimately
+  // coincide (both minted in the same millisecond), so the invariant that
+  // actually separates them is the digest-derived Base62 tail.
+  const TAIL = 'ses_'.length + 12
   assert.notEqual(canonicalSessionID('a'), canonicalSessionID('b'))
-  assert.notEqual(canonicalSessionID('a'), canonicalSessionID('b'))
+  assert.notEqual(canonicalSessionID('a').slice(TAIL), canonicalSessionID('b').slice(TAIL))
 })
 
 test('a conversation minted earlier keeps its session across a clock tick', () => {

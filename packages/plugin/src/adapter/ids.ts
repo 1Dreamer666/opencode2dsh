@@ -101,10 +101,12 @@ function base62Fixed(value: bigint, width: number): string {
  *
  * The sequence matters: the low 12 bits are exactly `counter`, and the
  * inversion flips them, which is why a real counter-1 session ends its time
- * segment in `ffe` — a structural consequence, not a magic marker. Upstream
- * reads the segment back and checks it against a wall-clock reading; a digest
- * prefix has no such structure, so it is rejected even though it matches the
- * regex.
+ * segment in `ffe` — a structural consequence, not a magic marker. Live
+ * probes (2026-10-13) show the free tier reads those low 12 bits back as a
+ * per-millisecond counter and accepts only `[0, 63]`; the high 36 clock bits
+ * are not checked (an id whose clock decodes to 1970 still passes). A digest
+ * prefix lands in that window ~1.5% of the time, so it is rejected almost
+ * always even though it matches the regex.
  *
  * We always mint counter 1: this plugin is the only writer of its own
  * sessions, so a per-millisecond counter would only add state.
@@ -153,8 +155,10 @@ export function canonicalSessionID(signal: string): string {
   const randomPart = base62Fixed(BigInt('0x' + sum.subarray(6, 16).toString('hex')), 14)
   const session = `ses_${timePart}${randomPart}`
 
-  // Evict the oldest entry rather than clearing: insertion-ordered Map, and a
-  // live conversation's entry is re-inserted on every request.
+  // Evict the oldest entry rather than clearing. Insertion-ordered Map, so
+  // this is FIFO by first mint, NOT LRU: a hit returns early above and does
+  // not re-insert. That is fine here — 1024 live conversations is far past
+  // any realistic window, and a re-minted id only costs cache affinity.
   if (sessionMemo.size >= SESSION_MEMO_LIMIT) {
     const oldest = sessionMemo.keys().next()
     if (!oldest.done) sessionMemo.delete(oldest.value)
