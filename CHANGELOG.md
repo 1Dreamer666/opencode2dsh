@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Free-lane chats stop failing with `API 密钥无效` / `403 FreeTierError` (#62). The synthesized session id was **shape**-correct but **derivation**-wrong: `canonicalSessionID()` filled the 12 hex characters of its `ses_` id with `sha256("ses\0" + signal)`, and upstream reads those characters as a wall clock. Since ~2026-10-13 the free tier decodes that segment and rejects anything that is not a real timestamp, so every request was refused even though the id matched the canonical regex — which is why the existing shape assertion kept passing while nothing worked. Those characters now come from upstream's own generator (`packages/schema/src/identifier.ts`): `~(Date.now() * 0x1000 + counter)`, with `counter` pinned at 1. Because the bitwise inversion flips the counter, real ids end their time segment in `ffe` — a structural consequence, not a marker, and the string-level tell that separates a genuine id from a digest. The conversation identity still comes from the digest, but only for the 14-character Base62 tail, so distinct conversations cannot collide and prompt-cache affinity survives. Sessions are memoized per conversation so a retry or a later turn reuses one id: re-reading a live clock per request would hand the free tier a new session every call and forfeit the cache affinity #56 established. Official `ses_` ids arriving from a real OpenCode client still pass through untouched.
+
 ## 0.3.11 (2026-10-11)
 
 ### Fixed
