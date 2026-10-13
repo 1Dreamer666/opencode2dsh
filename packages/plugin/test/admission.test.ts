@@ -165,7 +165,59 @@ test('admission: trusted sources are admitted with warnings even on failure', as
   )
   assert.ok(result.admitted)
   assert.equal(result.node?.exitIP, '') // unknown facts, address is the key
+  assert.equal(result.degraded, true, 'an unverified fallback must be flagged degraded')
   assert.ok(warnings.some((line) => line.includes('leased:1')))
+})
+
+test('admission: a failed trusted smoke never invents a fast, top-grade exit', async () => {
+  // Live regression (2026-10-13): all 470 subscription nodes failed to convert,
+  // every smoke failed, and the fallback stamped each node
+  // `latencyMs: 0 / quality: 'S'` — which pick() then ranked ahead of every
+  // measured exit. `0` means never-measured and must grade WORST.
+  const transport = fakeTransport({ '*': new Error('connect ECONNREFUSED') })
+  const result = await admitTrusted(
+    { ...deps(transport), logger: { warn: () => {} } },
+    { address: 'sub-dead:1', protocol: 'http', source: 'subscription' },
+  )
+  assert.ok(result.admitted)
+  assert.equal(result.node?.latencyMs, 0)
+  assert.notEqual(result.node?.quality, 'S')
+  assert.equal(result.node?.quality, 'C')
+  assert.equal(result.degraded, true)
+})
+
+test('admission: facts measured in steps 1-2 survive a later step failing', async () => {
+  // Steps 1+2 answered with a REAL exit IP, then step 3 refused. The measured
+  // facts must ride the failure result instead of being dropped, so the trusted
+  // fallback stores a real exit IP rather than a placeholder.
+  const transport = fakeTransport({
+    [ECHO_URL]: { status: 200, body: echoBody('203.0.113.9', 'JP', 'Tokyo') },
+    [MODELS_URL]: { status: 403, body: '' },
+  })
+  const failed = await admitCandidate(deps(transport), { address: 'sub:1', protocol: 'http', source: 'subscription' })
+  assert.equal(failed.admitted, false)
+  assert.equal(failed.reason, 'zen models HTTP 403')
+  assert.equal(failed.facts?.exitIP, '203.0.113.9', 'steps 1+2 facts must survive the step-3 refusal')
+
+  const trusted = await admitTrusted(
+    { ...deps(transport), logger: { warn: () => {} } },
+    { address: 'sub:1', protocol: 'http', source: 'subscription' },
+  )
+  assert.ok(trusted.admitted)
+  assert.equal(trusted.node?.exitIP, '203.0.113.9', 'the fallback must keep the measured exit IP')
+  assert.equal(trusted.node?.exitLocation, 'JP Tokyo')
+})
+
+test('admission: the trusted fallback prefers previously stored facts over placeholders', async () => {
+  const transport = fakeTransport({ '*': new Error('connect ECONNREFUSED') })
+  const result = await admitTrusted(
+    { ...deps(transport), logger: { warn: () => {} } },
+    { address: 'sub:2', protocol: 'http', source: 'subscription' },
+    { previous: { exitIP: '198.51.100.7', exitLocation: 'DE Frankfurt', latencyMs: 275, quality: 'S' } },
+  )
+  assert.equal(result.node?.exitIP, '198.51.100.7')
+  assert.equal(result.node?.latencyMs, 275)
+  assert.equal(result.node?.quality, 'S')
 })
 
 test('admission: scheme-carrying manual addresses build a valid agent URI (issue #44)', async () => {

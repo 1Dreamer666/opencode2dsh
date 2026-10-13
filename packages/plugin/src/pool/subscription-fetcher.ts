@@ -209,30 +209,37 @@ export class SubscriptionFetcher {
       try {
         const exits = await this.#deps.supervisor.reload(pending)
         if (this.#stopped) return
+        // Nodes already in the table are re-smoked, not skipped: a converted
+        // exit that failed its first smoke used to stay factless forever,
+        // because this filter dropped anything already present.
+        const known = new Set(this.#deps.pool.list().map((entry) => entry.id))
         const tasks: ProbeTask[] = exits
-          .filter((exit) => !this.#deps.pool.has(exit.address))
           .map((exit): ProbeTask => ({
             exitId: exit.address,
             kind: 'subscription-smoke',
             run: async () => {
               if (this.#stopped) return
+              const existing = this.#deps.pool.get(exit.address)
               const verdict = await admitTrusted(this.#deps, {
                 address: exit.address,
                 protocol: exit.protocol,
                 source: 'subscription',
-              })
+              }, existing
+                ? { previous: { exitIP: existing.exitIP, exitLocation: existing.exitLocation, latencyMs: existing.latencyMs, quality: existing.quality } }
+                : {})
               if (!this.#stopped && verdict.admitted && verdict.node) {
-                if (this.#deps.pool.add(verdict.node)) {
-                  // A node that only entered through the degraded fallback (its
-                  // smoke never succeeded) stays 'unknown': markOk here is what
-                  // let never-answering exits outrank healthy ones in pick().
-                  if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
+                const isNew = this.#deps.pool.add({ ...verdict.node, addedAt: existing?.addedAt ?? verdict.node.addedAt })
+                // A node that only entered through the degraded fallback (its
+                // smoke never succeeded) stays 'unknown': markOk here is what
+                // let never-answering exits outrank healthy ones in pick().
+                if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
+                if (!known.has(exit.address) && isNew) {
                   this.#state.convertedAdmitted += 1
-                  const served = exit.node
-                  this.#state.pendingConversion = this.#state.pendingConversion.filter(
-                    (node) => node !== served,
-                  )
                 }
+                const served = exit.node
+                this.#state.pendingConversion = this.#state.pendingConversion.filter(
+                  (node) => node !== served,
+                )
               }
             },
           }))
@@ -248,22 +255,25 @@ export class SubscriptionFetcher {
     // hot coarse screen: subscription nodes are paid resources, docs 4.1).
     if (this.#stopped) return
     const tasks: ProbeTask[] = plaintext
-      .filter((candidate) => !this.#deps.pool.has(candidate.address))
       .map((candidate): ProbeTask => ({
         exitId: candidate.address,
         kind: 'subscription-smoke',
         run: async () => {
           if (this.#stopped) return
+          const existing = this.#deps.pool.get(candidate.address)
           const verdict = await admitTrusted(this.#deps, {
             address: candidate.address,
             protocol: candidate.protocol,
             source: 'subscription',
-          })
+          }, existing
+            ? { previous: { exitIP: existing.exitIP, exitLocation: existing.exitLocation, latencyMs: existing.latencyMs, quality: existing.quality } }
+            : {})
           if (!this.#stopped && verdict.admitted && verdict.node) {
-            if (this.#deps.pool.add(verdict.node)) {
-              if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
-              this.#state.plaintextAdmitted += 1
-            }
+            const isNew = !existing
+            // add() refreshes the facts; health is only promoted on a real pass.
+            this.#deps.pool.add(isNew ? verdict.node : { ...verdict.node, addedAt: existing.addedAt })
+            if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
+            if (isNew) this.#state.plaintextAdmitted += 1
           }
         },
       }))

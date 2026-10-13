@@ -21,6 +21,7 @@ import { ExitPool, gradeOf, type ExitNode } from './pool/pool.ts'
 import type { UndiciSeam } from './pool/dispatcher.ts'
 import type { AdmissionDeps } from './pool/admission.ts'
 import { Prober } from './pool/prober.ts'
+import { PeriodicProber } from './pool/periodic-prober.ts'
 import { RefillScheduler } from './pool/refill.ts'
 import { SubscriptionFetcher } from './pool/subscription-fetcher.ts'
 import { SingBoxSupervisor } from './pool/singbox.ts'
@@ -109,6 +110,8 @@ export interface IpPoolRuntime {
   subscriptions: SubscriptionFetcher | null
   /** Free-source refill loop (null when free.enabled false). */
   refill: RefillScheduler | null
+  /** Periodic health probe loop (docs §4.3; always present while enabled). */
+  periodic: PeriodicProber
   /** Hot-apply one committed settings value onto the live runtime (docs §5.1).
    *  Every knob lands without restart; enabled toggles the dispatcher. */
   reconfigure(next: Opencode2dshConfig): Promise<void>
@@ -202,6 +205,13 @@ export async function startIpPool(
     return subscriptions
   }
 
+  /**
+   * Periodic health probe loop, assigned once the piece it drives (probeExit)
+   * exists below. Declared here because applyConfig — defined next and invoked
+   * at start AND on every settings commit — needs to start/stop it.
+   */
+  let periodicRef: PeriodicProber | null = null
+
   /** Apply the config to the live objects (initial start + reconfigure). */
   const applyConfig = (): void => {
     const current = config.ipPool ?? {}
@@ -209,6 +219,7 @@ export async function startIpPool(
     admissionDeps.blockedCountries = current.free?.blockedCountries
     admissionDeps.smokeModel = probeModels[0]
     prober.setMaxConcurrent(current.maxConcurrentProbes ?? 3)
+    periodicRef?.setIntervalMs(current.probeIntervalMs ?? 10 * 60_000)
     installer.setProxyHosts?.(current.proxyHosts)
 
     // Free loop on/off + restart on target change (interval fixed 10min).
@@ -228,6 +239,9 @@ export async function startIpPool(
             logger.info('opencode2dsh: first free exits admitted — exit routing engaged')
           }
         }
+        // The periodic prober was created before any exit existed; start its
+        // timer once the table is non-empty (start() is idempotent).
+        if (periodicRef !== null && current.enabled !== false) periodicRef.start()
       })
       refill.start()
     } else if (!wantRefill && refill !== null) {
@@ -242,6 +256,9 @@ export async function startIpPool(
       subscriptions?.stop()
       subscriptions = null
       fetcherActive = false
+      // A disabled pool must not keep probing (each probe spends anonymous-lane
+      // quota, §4.1).
+      if (current.enabled === false) periodicRef?.stop()
       return
     }
     const fetcher = ensureSubscriptions(urls)
@@ -347,6 +364,14 @@ export async function startIpPool(
     return 1
   }
 
+  // Periodic health probe (docs §4.3): the loop that re-measures cooled-down,
+  // never-probed and dead exits. Without it a subscription node whose smoke
+  // failed at admission kept `latencyMs: 0` forever — the refresh path filters
+  // `!pool.has(address)` and never revisits a node already in the table.
+  const periodic = new PeriodicProber(pool, (exitId) => probeExit(exitId))
+  periodicRef = periodic
+  if (pool.snapshot().total > 0) periodic.start()
+
   // Adapter-layer rotate delegate (docs §3.4/§8.1, IP-7): lets zen-adapter
   // restart a pre-content stream on a fresh exit instead of surfacing the
   // intermediate error to the host's retry budget.
@@ -356,6 +381,7 @@ export async function startIpPool(
     pool,
     installer,
     prober,
+    periodic,
     get subscriptions() { return subscriptions },
     get refill() { return refill },
     async reconfigure(next: Opencode2dshConfig) {
@@ -380,6 +406,9 @@ export async function startIpPool(
       } else if (!enable && installer.enabled) {
         installer.disable()
       }
+      // The periodic loop follows `enabled` and only runs with exits present.
+      if (enable && pool.snapshot().total > 0) periodicRef?.start()
+      else if (!enable) periodicRef?.stop()
       if (wasEnabled !== enable) {
         logger.info(`opencode2dsh: ip pool ${enable ? 'enabled' : 'disabled'} via settings (live)`)
       }
@@ -396,6 +425,7 @@ export async function startIpPool(
       setRotateDelegate(null)
       subscriptions?.stop()
       refill?.stop()
+      periodicRef?.stop()
       installer.dispose()
     },
   }
