@@ -25,7 +25,7 @@
 
 import Schema from '@deepseek-ai/schemastery'
 
-import { DEFAULT_SUBSCRIPTION_USER_AGENT } from '../pool/subscription.ts'
+import { DEFAULT_SUBSCRIPTION_USER_AGENT, normalizeSubscriptionUserAgent } from '../pool/subscription-defaults.ts'
 import { resolveSubscriptionUrls } from './subscription-urls.ts'
 
 /**
@@ -194,7 +194,7 @@ export function resolveIpPoolSettings(value: AnyIpPoolSection | undefined): IpPo
     subscription: {
       urls,
       refreshMs: raw.subscription?.refreshMs ?? 30 * 60_000,
-      userAgent: raw.subscription?.userAgent ?? DEFAULT_SUBSCRIPTION_USER_AGENT,
+      userAgent: normalizeSubscriptionUserAgent(raw.subscription?.userAgent),
     },
     singbox: { path: raw.singbox?.path ?? 'sing-box' },
     pinnedExitId: raw.pinnedExitId ?? '',

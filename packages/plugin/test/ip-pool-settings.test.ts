@@ -6,6 +6,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { staticFreeModels } from '../src/adapter/catalog.ts'
 
 import { IpPoolConfigSchema, resolveIpPoolSettings, resolveProbeModels, toIpPoolConfig, IP_POOL_NAMESPACE } from '../src/ip-pool-settings/namespace.ts'
 import { buildStatusView, isTrustedBridgeRequest, makeBridgeHandlers, makeBridgeRoutes, IP_POOL_BRIDGE_PREFIX } from '../src/ip-pool-settings/bridge.ts'
@@ -133,7 +134,7 @@ function fakeRuntime(overrides: Record<string, unknown> = {}): unknown {
     refill: { lastRound: { admitted: 2, rejected: 30, fetched: 1600, coarsePassed: 8, state: 'warning', at: 456 } },
     subscriptions: {
       urlCount: 2,
-      state: { pendingConversion: [{}, {}], convertedAdmitted: 1, plaintextAdmitted: 0, lastFetch: 789, lastError: '' },
+      state: { running: false, pendingConversion: [{}, {}], convertedAdmitted: 1, plaintextAdmitted: 0, lastFetch: 789, lastError: '' },
     },
     probeAll: async () => 2,
     probeExit: async () => 1,
@@ -235,6 +236,14 @@ test('probe handlers: scope subscriptions refuses on a disabled pool, not a cras
   assert.equal((result as { code: string }).code, 'pool-disabled')
 })
 
+test('subscription refresh errors reach the action response', async () => {
+  const rt = fakeRuntime({ subscriptions: { urlCount: 1, state: { lastError: 'subscription HTTP 502' } } }) as never
+  const handlers = makeBridgeHandlers(() => rt, () => ({ pinnedStrict: false, proxyHosts: [] }))
+  assert.deepEqual(await handlers.probe({ scope: 'subscriptions' }), {
+    ok: false, code: 'subscription-refresh-failed', message: 'subscription HTTP 502',
+  })
+})
+
 test('probe handlers: pool-disabled refusal when no runtime', async () => {
   const handlers = makeBridgeHandlers(() => null, () => ({ pinnedStrict: false, proxyHosts: [] }))
   const result = await handlers.probe({ scope: 'all' })
@@ -311,10 +320,10 @@ test('models handler lists S3 static rows plus live catalog through the seam', a
   assert.equal(result.ok, true)
   const value = (result as { value: { models: Array<{ id: string; verified: boolean }> } }).value
   // S3 static list first, all marked verified
-  assert.deepEqual(value.models.slice(0, 6).map((row) => row.verified), [true, true, true, true, true, true])
+  assert.deepEqual(value.models.slice(0, staticFreeModels.length).map((row) => row.verified), staticFreeModels.map(() => true))
   // big-pickle deduped (already static), live-only rows appended unverified
   const ids = value.models.map((row) => row.id)
-  assert.equal(ids.indexOf('muse-spark-1.3-contributor-free') > 5, true, 'live-only row appended after statics')
+  assert.equal(ids.indexOf('muse-spark-1.3-contributor-free') >= staticFreeModels.length, true, 'live-only row appended after statics')
   assert.equal(ids.lastIndexOf('big-pickle'), ids.indexOf('big-pickle'), 'no duplicate big-pickle')
   assert.equal(value.models.find((row) => row.id === 'brand-new-model')?.verified, false)
 })
@@ -324,7 +333,7 @@ test('models handler falls back to the static list without a live seam', async (
   const result = await handlers.models()
   assert.equal(result.ok, true)
   const value = (result as { value: { models: Array<{ id: string; verified: boolean }> } }).value
-  assert.ok(value.models.length >= 6)
+  assert.equal(value.models.length, staticFreeModels.length)
   assert.equal(value.models[0]!.id, 'big-pickle')
 })
 

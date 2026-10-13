@@ -93,6 +93,31 @@ test('subscription fetch failures are reported, never thrown', async () => {
   assert.equal(state.pendingConversion.length, 0)
 })
 
+test('a manual refresh joins an ongoing round and exposes running until completion', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let requests = 0
+  const { fetcher } = makeFetcher((async () => {
+    requests++
+    await gate
+    return new Response('proxies:\n  - name: encrypted\n    type: anytls\n    server: example.test\n    port: 443\n    password: test')
+  }) as typeof fetch)
+  fetcher.setUrls(['https://example.test/sub'])
+  const first = fetcher.refresh()
+  let completed = false
+  const second = fetcher.refreshNow().then((state) => { completed = true; return state })
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(completed, false)
+    assert.equal(fetcher.state.running, true)
+    assert.equal(requests, 1)
+  } finally { release() }
+  const results = await Promise.all([first, second])
+  assert.equal(fetcher.state.running, false)
+  assert.ok(results.every((state) => !state.running && state.lastFetch > 0 && state.pendingConversion.length === 1))
+  fetcher.stop()
+})
+
 test('subscription URLs are redacted in logs', async () => {
   const logs: string[] = []
   const { fetcher } = makeFetcher(
@@ -104,6 +129,31 @@ test('subscription URLs are redacted in logs', async () => {
   // nothing in the log carries the full credential
   assert.ok(logs.every((line) => !line.includes('VerySecretToken1234567890abcdef')))
   assert.ok(logs.some((line) => line.includes('…')))
+})
+
+test('stopping during a pull aborts it and prevents fetching later URLs', async () => {
+  let calls = 0
+  let release!: () => void
+  const { pool, fetcher } = makeFetcher((async (_url: string, init: RequestInit) => {
+    calls++
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    await new Promise((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => { release(); reject(new Error('aborted')) }, { once: true })
+    })
+    await gate
+    return new Response(SUB_BODY)
+  }) as typeof fetch)
+  fetcher.setUrls(['https://example.test/a', 'https://example.test/b'])
+  const round = fetcher.refresh()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  fetcher.stop()
+  await round
+  assert.equal(calls, 1)
+  assert.equal(fetcher.state.running, false)
+  assert.equal(fetcher.state.lastFetch, 0)
+  assert.equal(pool.snapshot().total, 0, 'cancelled request does not enqueue pool changes')
+  await fetcher.refreshNow()
+  assert.equal(calls, 1, 'stopped fetcher cannot restart')
 })
 
 test('subscription nodes never enter the pool twice (idempotent refresh)', async () => {

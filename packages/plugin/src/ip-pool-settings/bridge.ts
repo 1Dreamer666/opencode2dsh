@@ -60,6 +60,7 @@ export interface RefillView {
 }
 
 export interface SubscriptionView {
+  running: boolean
   /** URL count only — the URLs themselves never ride the bridge (§5.1 redaction). */
   urlCount: number
   pendingConversion: number
@@ -142,6 +143,7 @@ export function buildStatusView(
     subscription: runtime?.subscriptions
       ? {
         urlCount: runtime.subscriptions.urlCount,
+        running: runtime.subscriptions.state.running,
         pendingConversion: runtime.subscriptions.state.pendingConversion.length,
         convertedAdmitted: runtime.subscriptions.state.convertedAdmitted,
         plaintextAdmitted: runtime.subscriptions.state.plaintextAdmitted,
@@ -263,7 +265,7 @@ export type ListLiveModels = () => string[]
 /** Build the bridge handlers over the runtime + current settings. */
 export function makeBridgeHandlers(
   runtime: () => IpPoolRuntime | null,
-  settings: () => { pinnedStrict: boolean; proxyHosts: string[] },
+  settings: () => { enabled?: boolean; pinnedStrict: boolean; proxyHosts: string[] },
   deps: { listLiveModels?: ListLiveModels } = {},
 ): BridgeHandlers {
   return {
@@ -275,7 +277,7 @@ export function makeBridgeHandlers(
     },
     async probe(body) {
       const rt = runtime()
-      if (rt === null) return { ok: false, code: 'pool-disabled', message: 'ip pool is not running (enabled off)' }
+      if (rt === null || settings().enabled === false) return { ok: false, code: 'pool-disabled', message: 'ip pool is not running (enabled off)' }
       const scope = body.scope
       if (scope === 'all') {
         const queued = await rt.probeAll()
@@ -290,11 +292,15 @@ export function makeBridgeHandlers(
       // sources: this one re-fetches ONLY the configured subscription URLs and
       // converts their encrypted nodes through sing-box (docs §5.2).
       if (scope === 'subscriptions') {
-        if (rt.subscriptions === null) {
+        const subscriptions = rt.subscriptions
+        if (subscriptions === null || subscriptions.urlCount === 0) {
           return { ok: false, code: 'no-subscriptions', message: 'no subscription URLs are configured' }
         }
         await rt.refreshSubscriptions()
-        return { ok: true, value: { refreshed: true, urlCount: rt.subscriptions.urlCount } }
+        if (subscriptions.state.lastError) {
+          return { ok: false, code: 'subscription-refresh-failed', message: subscriptions.state.lastError }
+        }
+        return { ok: true, value: { refreshed: true, urlCount: subscriptions.urlCount } }
       }
       if (scope === 'exit') {
         const exitId = typeof body.exitId === 'string' ? body.exitId : ''

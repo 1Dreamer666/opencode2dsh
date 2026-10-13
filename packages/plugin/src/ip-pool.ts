@@ -238,6 +238,12 @@ export async function startIpPool(
     // Subscription layer: (re)create on URL change, keep the fetcher across
     // refresh-interval edits.
     const urls = current.subscriptions ?? []
+    if (urls.length === 0 || current.enabled === false) {
+      subscriptions?.stop()
+      subscriptions = null
+      fetcherActive = false
+      return
+    }
     const fetcher = ensureSubscriptions(urls)
     if (fetcher !== null) {
       fetcher.setIntervalMs(current.subscription?.refreshMs ?? 30 * 60_000)

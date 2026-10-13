@@ -48,7 +48,7 @@ const SUPPORTED_TYPES = new Set([
  * settings schema default and the fetcher's runtime fallback share one
  * literal and cannot drift; the fetcher re-exports it for its own callers.
  */
-export const DEFAULT_SUBSCRIPTION_USER_AGENT = 'clash-verge/v2.0'
+export { DEFAULT_SUBSCRIPTION_USER_AGENT } from './subscription-defaults.ts'
 
 /** GoProxy looksLikeYAML: the structural markers of a Clash config. */
 export function looksLikeYaml(content: string): boolean {

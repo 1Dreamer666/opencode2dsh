@@ -29,6 +29,8 @@ import { fieldWrite, poolWriteOps, type FieldWrite } from './settings-writes.ts'
 // Dependency-free (and so safe for the browser bundle): the shared
 // subscription-URL precedence rule, also used by the host resolver.
 import { resolveSubscriptionUrls } from '../ip-pool-settings/subscription-urls.ts'
+import { DEFAULT_SUBSCRIPTION_USER_AGENT, normalizeSubscriptionUserAgent } from '../pool/subscription-defaults.ts'
+import { postBridgeAction, type BridgeAction } from './bridge-action.ts'
 
 /** The reactive values and commands the Plugins page supplies for this page. */
 export interface ConfigPageForm {
@@ -114,7 +116,7 @@ export interface PoolStatusView {
     admitted: number; rejected: number; fetched: number; coarsePassed: number; state: string; at: number
     progress: { running: boolean; stage: 'fetch' | 'coarse' | 'admit' | 'idle'; sourcesDone: number; sourcesTotal: number; fetched: number; candidates: number; coarsePassed: number; coarseDone: number; admissions: number; admitted: number }
   } | null
-  subscription: { urlCount: number; pendingConversion: number; convertedAdmitted: number; plaintextAdmitted: number; lastFetch: number; lastError: string } | null
+  subscription: { running: boolean; urlCount: number; pendingConversion: number; convertedAdmitted: number; plaintextAdmitted: number; lastFetch: number; lastError: string } | null
   at: number
 }
 
@@ -135,11 +137,7 @@ const DEFAULTS: IpPoolSettingsValue = {
   maxConcurrentProbes: 3,
   free: { enabled: true, targetSize: 20, blockedCountries: ['CN'] },
   manual: [],
-  // Mirrors the Host schema default (docs §5.1, DEFAULT_SUBSCRIPTION_USER_AGENT
-  // in src/pool/subscription.ts). Spelled as a literal here on purpose: the
-  // browser bundle must not import a Host module (it would drag the YAML
-  // parser in), which is why every default on this line is already a literal.
-  subscription: { urls: [], refreshMs: 30 * 60_000, userAgent: 'clash-verge/v2.0' },
+  subscription: { urls: [], refreshMs: 30 * 60_000, userAgent: DEFAULT_SUBSCRIPTION_USER_AGENT },
   singbox: { path: 'sing-box' },
   pinnedExitId: '',
   pinnedStrict: false,
@@ -248,7 +246,7 @@ function diffWrites(form: FormState, value: IpPoolSettingsValue, base: Partial<I
   push('enabled', form.enabled, value.enabled, base.enabled)
   push('free', { enabled: form.freeEnabled, targetSize: Number(form.targetSize), blockedCountries: splitCsv(form.blockedCountries) }, value.free, base.free)
   push('manual', form.manual, value.manual, base.manual)
-  push('subscription', { urls: form.subscriptionUrls, refreshMs: Number(form.refreshMs), userAgent: normalizedUserAgent(form.userAgent) }, value.subscription, base.subscription)
+  push('subscription', { urls: form.subscriptionUrls, refreshMs: Number(form.refreshMs), userAgent: normalizeSubscriptionUserAgent(form.userAgent) }, value.subscription, base.subscription)
   push('singbox', { path: form.singboxPath }, value.singbox, base.singbox)
   push('pinnedExitId', form.pinnedExitId, value.pinnedExitId, base.pinnedExitId)
   push('pinnedStrict', form.pinnedStrict, value.pinnedStrict, base.pinnedStrict)
@@ -259,14 +257,6 @@ function diffWrites(form: FormState, value: IpPoolSettingsValue, base: Partial<I
 
 function splitCsv(line: string): string[] {
   return line.split(',').map((part) => part.trim().toUpperCase()).filter((part) => part.length > 0)
-}
-
-/** Clearing the UA field restores the default instead of writing an empty
- *  header — the Host schema and the runtime both treat empty as "default",
- *  and this keeps a cleared field from looking like a pending change. */
-function normalizedUserAgent(value: string): string {
-  const trimmed = value.trim()
-  return trimmed === '' ? DEFAULTS.subscription.userAgent : trimmed
 }
 
 /** One-line live refill progress: stage + counters (docs §5.3). */
@@ -621,6 +611,7 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
   // Poll the bridge /status: 1s while probing or refilling, 3s otherwise (docs §5.3).
   const probing = status !== null && status.prober.queued + status.prober.inFlight > 0
   const refilling = status?.refill?.progress.running === true
+  const refreshingSubscriptions = status?.subscription?.running === true
   const refreshStatus = useCallback(async (): Promise<void> => {
     try {
       const response = await fetch(`${BRIDGE_PREFIX}/status`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
@@ -638,9 +629,9 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
   useEffect(() => {
     if (snapshot?.status !== 'ready' || !hydratedRef.current || !form.enabled) return
     void refreshStatus()
-    const interval = setInterval(() => void refreshStatus(), probing || refilling ? 1_000 : 3_000)
+    const interval = setInterval(() => void refreshStatus(), probing || refilling || refreshingSubscriptions ? 1_000 : 3_000)
     return () => clearInterval(interval)
-  }, [snapshot?.status, form.enabled, probing, refilling, refreshStatus, hydratedRef.current]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [snapshot?.status, form.enabled, probing, refilling, refreshingSubscriptions, refreshStatus, hydratedRef.current]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (snapshot?.status === 'loading') {
     return <p className={styles.status}>{t('statusLoading')}</p>
@@ -719,13 +710,13 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
   }
 
   /** One bridge action (/probe): probe lanes, or the subscription refresh. */
-  const bridgeAction = async (body: { scope: 'all' | 'refill' | 'subscriptions' } | { scope: 'exit'; exitId: string }): Promise<void> => {
+  const bridgeAction = async (body: BridgeAction): Promise<void> => {
     setActionBusy(true)
     try {
-      await fetch(`${BRIDGE_PREFIX}/probe`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      await postBridgeAction(body)
       await refreshStatus()
-    } catch {
-      setStatusError(t('refreshError'))
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : t('refreshError'))
     } finally {
       setActionBusy(false)
     }
@@ -864,10 +855,10 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
               type="button"
               className={styles.ghostButton}
               data-testid="refresh-subscriptions"
-              disabled={actionBusy || !form.enabled || form.subscriptionUrls.length === 0}
+              disabled={actionBusy || refreshingSubscriptions || !form.enabled || served.subscription.urls.length === 0}
               onClick={() => { void bridgeAction({ scope: 'subscriptions' }) }}
             >
-              {t('subscriptionRefreshNow')}
+              {t(refreshingSubscriptions || actionBusy ? 'statusLoading' : 'subscriptionRefreshNow')}
             </button>
           </div>
         </div>

@@ -70,6 +70,9 @@ function classifyError(text: string): string {
   // Zen uses HTTP 403 for regional availability too. AUTH makes DSH replace
   // the actual upstream message with "API key is invalid".
   if (/\bRegionError\b|not available in your country/i.test(text)) return 'REGION_BLOCKED'
+  // This is a client restriction, not a bad credential. Preserve the upstream
+  // instruction and keep it outside the host's retryable failures.
+  if (/\bFreeTierError\b|free tier can only be used from within OpenCode/i.test(text)) return 'FREE_TIER_RESTRICTED'
   if (/\b(?:401|403)\b/.test(text)) return 'AUTH'
   if (/insufficient|quota|billing/i.test(text)) return QUOTA_EXCEEDED
   if (/\b429\b|rate.?limit/i.test(text)) return 'RATE_LIMIT'

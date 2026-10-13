@@ -144,6 +144,16 @@ test('authentication failures retain AUTH when the upstream does not report a re
   }
 })
 
+test('FreeTierError preserves the upstream client restriction instead of blaming an API key', async () => {
+  const message = 'HTTP 403: {"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}'
+  const completed = event({ stopReason: 'error', errorMessage: message })
+  if (completed.type !== 'done') assert.fail('expected done event')
+  for (const upstream of [completed, { type: 'error', error: completed.message } as PiEvent]) {
+    const chunks = await collect([upstream])
+    assert.deepEqual(failureOf(expectFinish(chunks[1])), { message, code: 'FREE_TIER_RESTRICTED' })
+  }
+})
+
 test('an empty completed response is an EMPTY_RESPONSE error', async () => {
   const chunks = await collect([event({ content: [] })])
   const failure = failureOf(expectFinish(chunks[1]))
