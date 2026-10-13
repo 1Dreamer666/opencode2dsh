@@ -47,14 +47,26 @@ const SUB_BODY = [
   '    port: 1080',
 ].join('\n')
 
-function makeFetcher(fetchImpl: typeof fetch, logger?: { info(message: string): void; warn(message: string): void }) {
+function makeFetcher(
+  fetchImpl: typeof fetch,
+  logger?: { info(message: string): void; warn(message: string): void },
+  options: { userAgent?: string } = {},
+) {
   const pool = new ExitPool()
   const prober = new Prober({ pool })
   const fetcher = new SubscriptionFetcher(
     { pool, prober, undici: seam() as never, fetchImpl },
-    { logger: logger ?? { info: () => {}, warn: () => {} } },
+    { logger: logger ?? { info: () => {}, warn: () => {} }, ...options },
   )
   return { pool, fetcher }
+}
+
+/** A fetch stub that records the User-Agent of every subscription pull. */
+function uaRecorder(seen: Array<string | undefined>): typeof fetch {
+  return (async (_url: string, init?: RequestInit) => {
+    seen.push((init?.headers as Record<string, string> | undefined)?.['user-agent'])
+    return new Response('')
+  }) as unknown as typeof fetch
 }
 
 test('subscription refresh: plaintext nodes smoke into the pool, encrypted park as pending', async () => {
@@ -102,3 +114,43 @@ test('subscription nodes never enter the pool twice (idempotent refresh)', async
   const rows = pool.list().filter((n) => n.source === 'subscription')
   assert.equal(rows.length, 2) // still the same two plaintext nodes
 })
+
+// -- fetch User-Agent (airport allow-lists) -----------------------------------
+
+test('subscription pulls send the default User-Agent, not the 502-ing 1.6.0', async () => {
+  const seen: Array<string | undefined> = []
+  const { fetcher } = makeFetcher(uaRecorder(seen))
+  fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
+  await fetcher.refresh()
+  // One pull per URL; the admission smoke rides deps.undici, not fetchImpl.
+  assert.deepEqual(seen, ['clash-verge/v2.0'])
+  assert.equal(fetcher.userAgent, 'clash-verge/v2.0')
+})
+
+test('the fetch UA is configurable and live-updatable without a restart', async () => {
+  const seen: Array<string | undefined> = []
+  const { fetcher } = makeFetcher(uaRecorder(seen), undefined, { userAgent: 'clash-verge/v2.0.3' })
+  fetcher.setUrls(['https://sub.example.com/x'])
+  await fetcher.refresh()
+  assert.deepEqual(seen, ['clash-verge/v2.0.3'])
+
+  // A settings save calls setUserAgent and the NEXT refresh must carry it.
+  fetcher.setUserAgent('mihomo/1.19.0')
+  await fetcher.refresh()
+  assert.equal(seen.at(-1), 'mihomo/1.19.0')
+})
+
+test('a blank UA falls back to the default instead of sending none', async () => {
+  const seen: Array<string | undefined> = []
+  const { fetcher } = makeFetcher(uaRecorder(seen), undefined, { userAgent: '   ' })
+  assert.equal(fetcher.userAgent, 'clash-verge/v2.0')
+
+  fetcher.setUserAgent('clash-verge/v2.0')
+  fetcher.setUserAgent('')
+  assert.equal(fetcher.userAgent, 'clash-verge/v2.0')
+
+  fetcher.setUrls(['https://sub.example.com/x'])
+  await fetcher.refresh()
+  assert.deepEqual(seen, ['clash-verge/v2.0'])
+})
+

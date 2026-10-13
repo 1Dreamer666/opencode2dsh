@@ -99,6 +99,8 @@ design.md §9.2 曾把「多出口」定为灰色能力并默认关闭（当时�
 
 解析产物统一为 `ParsedNode { name, type, server, port, raw }`（GoProxy 同构），分两路：`type ∈ {http, socks5}` → 直接进出口表走准入探测；其余 → 待转换清单（§1.2.2）。订阅刷新（默认 30min + 手动）只重拉 URL 重跑解析，断路器同免费源。机场订阅动辄几十节点，准入探测照 §4.5 全链走（机场节点质量参差，冒烟一步不能省）。
 
+拉取请求的 **User-Agent 是设置项**（`subscription.userAgent`，默认 `clash-verge/v2.0`）：机场普遍按 UA 做白名单，不在名单里的 UA 拿回来的是错误页而不是订阅体（实测某机场对 `clash-verge/1.6.0` 返回 502 Bad Gateway，对 `clash-verge/v2.0` 正常）。UA 还可能决定**返回哪种格式**——Clash 形状的 UA 给 `proxies:` YAML，v2ray 形状的给 base64 链接，后者会让所有节点都需要 sing-box 转换。所以换 UA 后要顺带确认解析出的 `detected` 格式与节点数。
+
 #### 1.2.2 订阅拨号层：明文直拨，加密节点需要外部核心
 
 技术边界（2026-09-04 实测 npm 生态）：
@@ -464,6 +466,7 @@ POST {zen}/v1/chat/completions
 | blockedCountries | `['CN']` | 准入地理黑名单（国家代码） |
 | freeSourceEnabled | true | 免费源抓取总开关（关掉 = 只用 manual/subscription 来源） |
 | subscriptionRefreshMs | 30min | 订阅刷新间隔（拉 URL 重跑解析，断路器同免费源） |
+| subscription.userAgent | `clash-verge/v2.0` | 订阅拉取的 User-Agent。机场普遍按 UA 做白名单：不在名单里会返回错误页，实测某机场对 `clash-verge/1.6.0` 直接 502 Bad Gateway、对 `clash-verge/v2.0` 正常；部分机场还按 UA 决定**返回格式**（Clash 形状给 `proxies:` YAML，v2ray 形状给 base64 链接）。空值回落默认值。 |
 | pinnedStrict | false | 绝对固定模式（§3.6）：true 时 pinned 失败透传、不换出口不直连 |
 
 全部进 settings namespace，设置页可调（maxConcurrentProbes 也开放：有些用户宁可慢也不并发）。
@@ -503,6 +506,7 @@ Config = Schema.object({
   subscription: Schema.object({                   // 机场/自建订阅（§1.2 来源 3）
     urls: Schema.array(Schema.string()).default([]),   // 订阅 URL（回显脱敏）
     refreshMs: Schema.number().default(30 * 60 * 1000),
+    userAgent: Schema.string().default('clash-verge/v2.0'),  // 拉取 UA（机场白名单，§4.6；空值回落默认）
   }),
   singbox: Schema.object({                        // 加密节点转换核心（§1.2.2）
     path: Schema.string().default('sing-box'),    // sing-box 二进制路径（PATH 或绝对路径）

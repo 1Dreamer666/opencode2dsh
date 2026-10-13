@@ -70,7 +70,7 @@ export interface IpPoolSettingsValue {
   maxConcurrentProbes: number
   free: { enabled: boolean; targetSize: number; blockedCountries: string[] }
   manual: string[]
-  subscription: { urls: string[]; refreshMs: number }
+  subscription: { urls: string[]; refreshMs: number; userAgent: string }
   /** Previous composition spelling, migrated on a subscription edit. */
   subscriptions?: string[]
   singbox: { path: string }
@@ -132,7 +132,11 @@ const DEFAULTS: IpPoolSettingsValue = {
   maxConcurrentProbes: 3,
   free: { enabled: true, targetSize: 20, blockedCountries: ['CN'] },
   manual: [],
-  subscription: { urls: [], refreshMs: 30 * 60_000 },
+  // Mirrors the Host schema default (docs §5.1, DEFAULT_SUBSCRIPTION_USER_AGENT
+  // in src/pool/subscription.ts). Spelled as a literal here on purpose: the
+  // browser bundle must not import a Host module (it would drag the YAML
+  // parser in), which is why every default on this line is already a literal.
+  subscription: { urls: [], refreshMs: 30 * 60_000, userAgent: 'clash-verge/v2.0' },
   singbox: { path: 'sing-box' },
   pinnedExitId: '',
   pinnedStrict: false,
@@ -155,6 +159,7 @@ interface FormState {
   manual: string[]
   subscriptionUrls: string[]
   refreshMs: string
+  userAgent: string
   singboxPath: string
   pinnedExitId: string
   pinnedStrict: boolean
@@ -171,6 +176,7 @@ function emptyForm(): FormState {
     manual: [],
     subscriptionUrls: [],
     refreshMs: String(DEFAULTS.subscription.refreshMs),
+    userAgent: DEFAULTS.subscription.userAgent,
     singboxPath: DEFAULTS.singbox.path,
     pinnedExitId: '',
     pinnedStrict: DEFAULTS.pinnedStrict,
@@ -188,6 +194,7 @@ function formFromValue(value: IpPoolSettingsValue): FormState {
     manual: [...value.manual],
     subscriptionUrls: [...value.subscription.urls],
     refreshMs: String(value.subscription.refreshMs),
+    userAgent: value.subscription.userAgent,
     singboxPath: value.singbox.path,
     pinnedExitId: value.pinnedExitId,
     pinnedStrict: value.pinnedStrict,
@@ -210,10 +217,16 @@ interface ServedEntry {
  */
 function servedSection(state: ConfigFormSnapshot<Record<string, unknown>> | undefined): IpPoolSettingsValue {
   const served = (state?.value as ServedEntry | undefined)?.ipPool
+  // The Host's `Schema.array()` gives the legacy flat key an implicit `[]`, so
+  // it is ALWAYS present in a served value; letting it win would render an
+  // empty subscription list even right after a successful save. It may only
+  // stand in when the canonical nested list carries nothing.
+  const nestedUrls = served?.subscription?.urls ?? []
+  const legacyUrls = served?.subscriptions ?? []
   return {
     ...DEFAULTS, ...served,
     free: { ...DEFAULTS.free, ...served?.free },
-    subscription: { ...DEFAULTS.subscription, ...served?.subscription, ...(served?.subscriptions === undefined ? {} : { urls: served.subscriptions }) },
+    subscription: { ...DEFAULTS.subscription, ...served?.subscription, ...(nestedUrls.length > 0 ? {} : { urls: legacyUrls }) },
     singbox: { ...DEFAULTS.singbox, ...served?.singbox },
   }
 }
@@ -232,7 +245,7 @@ function diffWrites(form: FormState, value: IpPoolSettingsValue, base: Partial<I
   push('enabled', form.enabled, value.enabled, base.enabled)
   push('free', { enabled: form.freeEnabled, targetSize: Number(form.targetSize), blockedCountries: splitCsv(form.blockedCountries) }, value.free, base.free)
   push('manual', form.manual, value.manual, base.manual)
-  push('subscription', { urls: form.subscriptionUrls, refreshMs: Number(form.refreshMs) }, value.subscription, base.subscription)
+  push('subscription', { urls: form.subscriptionUrls, refreshMs: Number(form.refreshMs), userAgent: normalizedUserAgent(form.userAgent) }, value.subscription, base.subscription)
   push('singbox', { path: form.singboxPath }, value.singbox, base.singbox)
   push('pinnedExitId', form.pinnedExitId, value.pinnedExitId, base.pinnedExitId)
   push('pinnedStrict', form.pinnedStrict, value.pinnedStrict, base.pinnedStrict)
@@ -243,6 +256,14 @@ function diffWrites(form: FormState, value: IpPoolSettingsValue, base: Partial<I
 
 function splitCsv(line: string): string[] {
   return line.split(',').map((part) => part.trim().toUpperCase()).filter((part) => part.length > 0)
+}
+
+/** Clearing the UA field restores the default instead of writing an empty
+ *  header — the Host schema and the runtime both treat empty as "default",
+ *  and this keeps a cleared field from looking like a pending change. */
+function normalizedUserAgent(value: string): string {
+  const trimmed = value.trim()
+  return trimmed === '' ? DEFAULTS.subscription.userAgent : trimmed
 }
 
 /** One-line live refill progress: stage + counters (docs §5.3). */
@@ -846,6 +867,15 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
               {t('subscriptionRefreshNow')}
             </button>
           </div>
+        </div>
+        <div className={styles.fieldRow}>
+          <TextField
+            label={t('subscriptionUserAgent')}
+            hint={t('subscriptionUserAgentHint')}
+            value={form.userAgent}
+            testId="field-subscriptionUserAgent"
+            onChange={(value) => { setSaved(false); setForm({ ...form, userAgent: value }) }}
+          />
         </div>
         {status?.subscription !== null && status?.subscription !== undefined && (
           <span className={styles.status}>

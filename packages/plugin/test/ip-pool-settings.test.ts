@@ -7,7 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { IpPoolConfigSchema, resolveProbeModels, toIpPoolConfig, IP_POOL_NAMESPACE } from '../src/ip-pool-settings/namespace.ts'
+import { IpPoolConfigSchema, resolveIpPoolSettings, resolveProbeModels, toIpPoolConfig, IP_POOL_NAMESPACE } from '../src/ip-pool-settings/namespace.ts'
 import { buildStatusView, isTrustedBridgeRequest, makeBridgeHandlers, makeBridgeRoutes, IP_POOL_BRIDGE_PREFIX } from '../src/ip-pool-settings/bridge.ts'
 
 // -- namespace ---------------------------------------------------------------
@@ -28,6 +28,9 @@ test('schema fills every default from an empty section', () => {
   assert.deepEqual((value.free as Record<string, unknown>).blockedCountries, ['CN'])
   assert.deepEqual(value.manual, [])
   assert.deepEqual((value.subscription as Record<string, unknown>).urls, [])
+  // The built-in fetch UA is the airport allow-listed spelling, not 1.6.0 —
+  // a real airport answers 502 Bad Gateway for the latter (docs 4.6).
+  assert.equal((value.subscription as Record<string, unknown>).userAgent, 'clash-verge/v2.0')
   assert.equal((value.singbox as Record<string, unknown>).path, 'sing-box')
   assert.equal(value.pinnedExitId, '')
   assert.equal(value.pinnedStrict, false)
@@ -36,6 +39,38 @@ test('schema fills every default from an empty section', () => {
 test('schema rejects out-of-range probe concurrency', () => {
   assert.throws(() => IpPoolConfigSchema({ maxConcurrentProbes: 9 }))
   assert.throws(() => IpPoolConfigSchema({ maxConcurrentProbes: 0 }))
+})
+
+test('a schema-resolved value keeps its nested subscription urls (legacy [] must not shadow them)', () => {
+  // Regression (live 2026-10-12): the settings page saved a subscription URL,
+  // the Host persisted it, and the pool still assembled with zero subscription
+  // URLs — `/status` reported `subscriptions: null`, so no fetcher was ever
+  // created and the card's subscription count stayed 0. `Schema.array()` hands
+  // an absent array an implicit `[]`, so the resolved value ALWAYS carries the
+  // legacy flat key, and `raw.subscriptions ?? raw.subscription?.urls` resolved
+  // to that empty array. The value must be fed through the schema here: a raw
+  // hand-written section (no flat key at all) cannot reproduce it.
+  const resolved = IpPoolConfigSchema({
+    subscription: { urls: ['https://sub.example.com/token'], refreshMs: 1800000 },
+  } as never)
+  assert.deepEqual((resolved as Record<string, unknown>).subscriptions, [], 'the flat key is present-but-empty in a served value')
+
+  const settings = resolveIpPoolSettings(resolved as never)
+  assert.deepEqual(settings.subscription.urls, ['https://sub.example.com/token'])
+  assert.deepEqual(toIpPoolConfig(settings).subscriptions, ['https://sub.example.com/token'])
+})
+
+test('the legacy flat spelling still carries urls when the nested list is empty', () => {
+  // Older compositions write the flat key only; it must keep working.
+  const settings = resolveIpPoolSettings({ subscriptions: ['https://legacy.example.com/sub'] })
+  assert.deepEqual(settings.subscription.urls, ['https://legacy.example.com/sub'])
+
+  // And when the nested spelling has content it wins over a stale flat list.
+  const both = resolveIpPoolSettings({
+    subscriptions: ['https://stale.example.com/sub'],
+    subscription: { urls: ['https://canonical.example.com/sub'], refreshMs: 60_000, userAgent: 'clash-verge/v2.0' },
+  })
+  assert.deepEqual(both.subscription.urls, ['https://canonical.example.com/sub'])
 })
 
 test('resolveProbeModels defaults to S3 first and dedupes user entries', () => {
@@ -50,7 +85,7 @@ test('toIpPoolConfig maps the settings value onto the plugin config shape', () =
     pinnedExitId: 'http://127.0.0.1:7897',
     pinnedStrict: true,
     maxConcurrentProbes: 7,
-    subscription: { urls: ['https://sub.example.com/token'], refreshMs: 123_456 },
+    subscription: { urls: ['https://sub.example.com/token'], refreshMs: 123_456, userAgent: 'mihomo/1.19.0' },
   }) as never)
   assert.equal(mapped.enabled, true)
   assert.deepEqual(mapped.manual, ['http://1.2.3.4:8080'])
@@ -60,10 +95,10 @@ test('toIpPoolConfig maps the settings value onto the plugin config shape', () =
   assert.deepEqual(mapped.probeModels, ['big-pickle'])
   assert.deepEqual(mapped.singbox, { path: 'sing-box' })
   // The runtime reads these two off the config shape (ip-pool.ts:
-  // Prober construction + SubscriptionFetcher interval), so dropping them here
-  // would reset them to the default on every live commit.
+  // Prober construction + SubscriptionFetcher interval/UA), so dropping them
+  // here would reset them to the default on every live commit.
   assert.equal(mapped.maxConcurrentProbes, 7)
-  assert.deepEqual(mapped.subscription, { refreshMs: 123_456 })
+  assert.deepEqual(mapped.subscription, { refreshMs: 123_456, userAgent: 'mihomo/1.19.0' })
 })
 
 // -- bridge: status view -------------------------------------------------------
