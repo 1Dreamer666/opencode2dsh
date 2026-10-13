@@ -503,6 +503,7 @@ Config = Schema.object({
     blockedCountries: Schema.array(Schema.string()).default(['CN']),
   }),
   manual: Schema.array(Schema.string()).default([]),  // 手填明文代理（§1.2 来源 2），'http://h:p' 或 'socks5://h:p'
+  subscriptions: Schema.array(Schema.string()),      // 旧 patch 拼写（扁平键），下次保存订阅时被迁移掉
   subscription: Schema.object({                   // 机场/自建订阅（§1.2 来源 3）
     urls: Schema.array(Schema.string()).default([]),   // 订阅 URL（回显脱敏）
     refreshMs: Schema.number().default(30 * 60 * 1000),
@@ -519,6 +520,8 @@ Config = Schema.object({
 ```
 
 订阅 URL 的脱敏边界（2026-09-05 定稿，§4.1 纪律延伸）：官方 `settings.describe` 必须回显完整值——表单要能编辑它，redact 会把字段变成只写。所以**脱敏发生在卡片渲染层**（显示 `前12字…后6字`），宿主 bridge 的 `/status` 不回显订阅 URL，日志沿用 `#redact`。明文只存 settings 文档（本机文件，用户自己的磁盘）。
+
+**订阅 URL 的两种拼写（读法纪律）**：`subscription.urls`（规范，表单写入）与 `subscriptions`（旧扁平键，兼容历史 patch）指向同一份数据。读取时必须按「第一个**非空**列表」取值，不能写 `subscriptions ?? subscription.urls`：schemastery 会给每个 `Schema.array()` 隐式注入 `meta.default = []`（**不需要**显式 `.default()`），所以扁平键永远解析成 `[]` 而非 `undefined`，`??` 会在它上面短路并把规范字段整个丢掉——表现为「保存成功、设置页却回显空列表、运行时收到 0 个 URL」。该规则集中在 `src/ip-pool-settings/subscription-urls.ts`，Host 与客户端共用；该模块刻意不依赖任何包，因为 client bundle 的纯度门会拒绝非平台 seed 的 `@deepseek-ai/*` 导入。同类隐患适用于所有 `Schema.array()` 字段（`manual`、`probeModels`、`proxyHosts`、`free.blockedCountries`）——凡是基于 `??` 的回落都要先确认上游有没有被注入 `[]`。
 
 ### 5.2 卡片内容（React + CSS Modules）
 
@@ -539,7 +542,7 @@ Config = Schema.object({
 dsh-llm-proxy 的 bridge 有四个面（describe/mutate/models/test），前两个是 rc.6 allowlist 逼出来的 settings 兜底。rc.2 宿主无 allowlist，我们只保留后两类面的思路：
 
 - `POST /status`：池状态机快照——四态徽章 + 可用/容量 + 来源计数（free/manual/subscription）+ 两级健康（出口表：地址/来源/位置/延迟/质量/出口 IP/状态/冷却到期时刻 + 封禁表：(出口, 模型, bannedAt)）+ Prober 队列进度（enqueued/completed/inFlight/queued）+ refill 上轮摘要 + 订阅层状态（pendingConversion 数、convertedAdmitted、lastFetch、lastError——**不含 URL 明文**）。返回结构化 JSON，卡片 3s 轮询（探活进行中 1s）。
-- `POST /probe`：`{scope: 'all'|'exit'|'refill', exitId?}`。`all`：全池出口 × probeModels 的周期探测一次（入 Prober 队列，返回队列长度，前端看 /status 进度）；`exit`：单出口插队探测；`refill`：手动触发一次状态机 refill 轮（免费源抓取+准入）。探测在宿主侧跑：走 Prober 两级调度（同出口串行 + 全局上限），不碰浏览器。
+- `POST /probe`：`{scope: 'all'|'exit'|'refill'|'subscriptions', exitId?}`。`all`：全池出口 × probeModels 的周期探测一次（入 Prober 队列，返回队列长度，前端看 /status 进度）；`exit`：单出口插队探测；`refill`：手动触发一次状态机 refill 轮（免费源抓取+准入）；`subscriptions`：手动触发一次订阅拉取+转换轮（重取已配置的订阅 URL，加密节点交 sing-box，对应卡片「立即刷新」；未配置 URL 时返回 `no-subscriptions`）。两条手动轮次刻意分开：`refill` 抓的是公共免费代理源，`subscriptions` 只碰用户自己的订阅，互不代替。探测在宿主侧跑：走 Prober 两级调度（同出口串行 + 全局上限），不碰浏览器。
 - 路由护栏照抄 dsh-llm-proxy settings.js：loopback socket + 规范 Host + same-origin 三重校验、JSON body 上限、`{ok, code, message}` 信封。**不做 settings 代理面**（官方通道在）。
 - 页面注册进 `plugins.item`（`@deepseek-ai/dsh-client-ui-plugin-manager` 拥有的 list slot，`id: 'opencode2dsh'`）；插件页拥有卡片外框、标题、one-liner 与保存按钮，`view:'summary'` 返回描述、`view:'page'` 返回表单，保存走共享 `SettingsForm` 外框。挂载门控 `ctx.configForms.whileServed(['opencode2dsh'], …)`，官方 form ready 之前不渲染。0.1.7 之前的 keyed `settings.plugin.item` 与双形态兼容分支都已删除。
 

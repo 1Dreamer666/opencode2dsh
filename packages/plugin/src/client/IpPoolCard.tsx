@@ -26,6 +26,9 @@ import type { ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/cli
 import type { en } from './locales.ts'
 import styles from './ip-pool.module.css'
 import { fieldWrite, poolWriteOps, type FieldWrite } from './settings-writes.ts'
+// Dependency-free (and so safe for the browser bundle): the shared
+// subscription-URL precedence rule, also used by the host resolver.
+import { resolveSubscriptionUrls } from '../ip-pool-settings/subscription-urls.ts'
 
 /** The reactive values and commands the Plugins page supplies for this page. */
 export interface ConfigPageForm {
@@ -217,16 +220,16 @@ interface ServedEntry {
  */
 function servedSection(state: ConfigFormSnapshot<Record<string, unknown>> | undefined): IpPoolSettingsValue {
   const served = (state?.value as ServedEntry | undefined)?.ipPool
-  // The Host's `Schema.array()` gives the legacy flat key an implicit `[]`, so
-  // it is ALWAYS present in a served value; letting it win would render an
-  // empty subscription list even right after a successful save. It may only
-  // stand in when the canonical nested list carries nothing.
-  const nestedUrls = served?.subscription?.urls ?? []
-  const legacyUrls = served?.subscriptions ?? []
   return {
     ...DEFAULTS, ...served,
     free: { ...DEFAULTS.free, ...served?.free },
-    subscription: { ...DEFAULTS.subscription, ...served?.subscription, ...(nestedUrls.length > 0 ? {} : { urls: legacyUrls }) },
+    // `subscription.urls` is canonical and the legacy flat `subscriptions` is
+    // only a fallback: the shared resolver picks whichever actually carries
+    // URLs. Spreading the flat key on a plain `!== undefined` check would
+    // clobber the nested field with the `[]` schemastery injects into every
+    // `Schema.array()` — which is what made a freshly saved URL render as an
+    // empty list. See subscription-urls.ts.
+    subscription: { ...DEFAULTS.subscription, ...served?.subscription, urls: resolveSubscriptionUrls(served) },
     singbox: { ...DEFAULTS.singbox, ...served?.singbox },
   }
 }
@@ -715,8 +718,8 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
     failed: error !== null,
   }
 
-  /** One bridge action (/probe). */
-  const bridgeAction = async (body: { scope: 'all' | 'refill' } | { scope: 'exit'; exitId: string }): Promise<void> => {
+  /** One bridge action (/probe): probe lanes, or the subscription refresh. */
+  const bridgeAction = async (body: { scope: 'all' | 'refill' | 'subscriptions' } | { scope: 'exit'; exitId: string }): Promise<void> => {
     setActionBusy(true)
     try {
       await fetch(`${BRIDGE_PREFIX}/probe`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -861,8 +864,8 @@ function CardBody(props: { settings: ConfigPageForm | undefined; t: IpPoolCardPr
               type="button"
               className={styles.ghostButton}
               data-testid="refresh-subscriptions"
-              disabled={actionBusy || !form.enabled}
-              onClick={() => { void bridgeAction({ scope: 'refill' }) }}
+              disabled={actionBusy || !form.enabled || form.subscriptionUrls.length === 0}
+              onClick={() => { void bridgeAction({ scope: 'subscriptions' }) }}
             >
               {t('subscriptionRefreshNow')}
             </button>

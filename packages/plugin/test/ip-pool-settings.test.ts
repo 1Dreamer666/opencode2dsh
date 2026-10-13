@@ -204,6 +204,37 @@ test('probe handlers: scope all/refill/exit dispatch and reject unknowns', async
   assert.equal((missing as { code: string }).code, 'unknown-exit')
 })
 
+test('probe handlers: scope subscriptions drives the subscription refresh lane', async () => {
+  // The card's 立即刷新 button used to send scope 'refill' — the free-source
+  // lane — so it never refreshed subscriptions, and `refreshSubscriptions()`
+  // was dead code with no bridge path at all.
+  let refreshed = 0
+  const rt = fakeRuntime({ refreshSubscriptions: async () => { refreshed += 1 } }) as never
+  const handlers = makeBridgeHandlers(() => rt, () => ({ pinnedStrict: false, proxyHosts: [] }))
+  const result = await handlers.probe({ scope: 'subscriptions' })
+  assert.equal(refreshed, 1, 'refreshSubscriptions() is actually called')
+  // The URL count may ride out; the URLs themselves never do (docs §5.1).
+  assert.deepEqual(result, { ok: true, value: { refreshed: true, urlCount: 2 } })
+  assert.equal(JSON.stringify(result).includes('http'), false, 'no URL leaks through the bridge')
+})
+
+test('probe handlers: scope subscriptions reports no-subscriptions instead of a silent success', async () => {
+  // Without a fetcher there is nothing to refresh. Returning ok:true here would
+  // reproduce the original "clicked, nothing happened, no feedback" report.
+  const rt = fakeRuntime({ subscriptions: null }) as never
+  const handlers = makeBridgeHandlers(() => rt, () => ({ pinnedStrict: false, proxyHosts: [] }))
+  const result = await handlers.probe({ scope: 'subscriptions' })
+  assert.equal(result.ok, false)
+  assert.equal((result as { code: string }).code, 'no-subscriptions')
+})
+
+test('probe handlers: scope subscriptions refuses on a disabled pool, not a crash', async () => {
+  const handlers = makeBridgeHandlers(() => null, () => ({ pinnedStrict: false, proxyHosts: [] }))
+  const result = await handlers.probe({ scope: 'subscriptions' })
+  assert.equal(result.ok, false)
+  assert.equal((result as { code: string }).code, 'pool-disabled')
+})
+
 test('probe handlers: pool-disabled refusal when no runtime', async () => {
   const handlers = makeBridgeHandlers(() => null, () => ({ pinnedStrict: false, proxyHosts: [] }))
   const result = await handlers.probe({ scope: 'all' })

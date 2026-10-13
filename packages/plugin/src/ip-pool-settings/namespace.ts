@@ -26,6 +26,7 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { DEFAULT_SUBSCRIPTION_USER_AGENT } from '../pool/subscription.ts'
+import { resolveSubscriptionUrls } from './subscription-urls.ts'
 
 /**
  * Settings namespace owned by this plugin: the Loader entry id declared by
@@ -83,11 +84,13 @@ export const IpPoolConfigSchema = Schema.object({
   /** Manually added plain proxies: 'http://h:p' or 'socks5://h:p' (§1.2 source 2). */
   manual: Schema.array(Schema.string()).default([]),
   /**
-   * Previous patch spelling. A plain (default-less) array field here does NOT
-   * stay undefined the way this comment once assumed: `Schema.array()` resolves
-   * an absent array to `[]`, so the field is always present in a served value.
-   * `resolveIpPoolSettings()` therefore prefers nested `subscription.urls` and
-   * only falls back to this key when that one is empty.
+   * Previous patch spelling (legacy flat key), migrated away on the next
+   * subscription edit.
+   *
+   * NOTE: omitting `.default()` does NOT leave this field `undefined` —
+   * schemastery assigns `meta.default = []` to every `Schema.array()`. Reading
+   * it as a fallback therefore has to treat an empty list as "absent"; a bare
+   * `??` would let this key shadow the nested one. See subscription-urls.ts.
    */
   subscriptions: Schema.array(Schema.string()),
   subscription: Schema.object({
@@ -173,18 +176,11 @@ export interface AnyIpPoolSection {
  */
 export function resolveIpPoolSettings(value: AnyIpPoolSection | undefined): IpPoolSettings {
   const raw = value ?? {}
-  // Subscription URLs live under the canonical nested `subscription.urls`; the
-  // flat `subscriptions` key is the PREVIOUS patch spelling, kept only for
-  // older compositions. It cannot be tested with `??`: a resolved value has
-  // already been through the schema, and `Schema.array()` gives an ARRAY an
-  // implicit `[]` even without `.default()` — so `subscriptions` is never
-  // nullish, and a `??` chain lets that empty array shadow every URL the
-  // settings page writes. The pool then assembles with zero subscription URLs
-  // and never creates the fetcher at all. Prefer the nested spelling whenever
-  // it carries content; fall back to the legacy key only when it does not.
-  const nestedUrls = raw.subscription?.urls ?? []
-  const legacyUrls = raw.subscriptions ?? []
-  const urls = nestedUrls.length > 0 ? nestedUrls : legacyUrls
+  // Never `raw.subscriptions ?? raw.subscription?.urls`: schemastery gives every
+  // `Schema.array()` an implicit `[]` default, so the flat key is never
+  // `undefined` and would short-circuit the canonical nested field away (see
+  // subscription-urls.ts for the full account).
+  const urls = resolveSubscriptionUrls(raw)
   return {
     enabled: raw.enabled ?? false,
     probeModels: raw.probeModels ?? [],
