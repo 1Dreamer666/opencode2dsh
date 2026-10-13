@@ -25,6 +25,8 @@
 
 import Schema from '@deepseek-ai/schemastery'
 
+import { resolveSubscriptionUrls } from './subscription-urls.ts'
+
 /**
  * Settings namespace owned by this plugin: the Loader entry id declared by
  * `cordis.patch.yml`. Mirrored by `SETTINGS_NAMESPACE` in src/client/index.ts.
@@ -80,7 +82,15 @@ export const IpPoolConfigSchema = Schema.object({
   }),
   /** Manually added plain proxies: 'http://h:p' or 'socks5://h:p' (§1.2 source 2). */
   manual: Schema.array(Schema.string()).default([]),
-  /** Previous patch spelling; no default so nested settings can take over. */
+  /**
+   * Previous patch spelling (legacy flat key), migrated away on the next
+   * subscription edit.
+   *
+   * NOTE: omitting `.default()` does NOT leave this field `undefined` —
+   * schemastery assigns `meta.default = []` to every `Schema.array()`. Reading
+   * it as a fallback therefore has to treat an empty list as "absent"; a bare
+   * `??` would let this key shadow the nested one. See subscription-urls.ts.
+   */
   subscriptions: Schema.array(Schema.string()),
   subscription: Schema.object({
     /** Airport/self-hosted subscription URLs (display-redacted client-side, §5.1). */
@@ -159,7 +169,11 @@ export interface AnyIpPoolSection {
  */
 export function resolveIpPoolSettings(value: AnyIpPoolSection | undefined): IpPoolSettings {
   const raw = value ?? {}
-  const urls = raw.subscriptions ?? raw.subscription?.urls ?? []
+  // Never `raw.subscriptions ?? raw.subscription?.urls`: schemastery gives every
+  // `Schema.array()` an implicit `[]` default, so the flat key is never
+  // `undefined` and would short-circuit the canonical nested field away (see
+  // subscription-urls.ts for the full account).
+  const urls = resolveSubscriptionUrls(raw)
   return {
     enabled: raw.enabled ?? false,
     probeModels: raw.probeModels ?? [],

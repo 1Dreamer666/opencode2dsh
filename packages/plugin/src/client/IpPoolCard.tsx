@@ -26,6 +26,9 @@ import type { ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/cli
 import type { en } from './locales.ts'
 import styles from './ip-pool.module.css'
 import { fieldWrite, poolWriteOps, type FieldWrite } from './settings-writes.ts'
+// Dependency-free (and so safe for the browser bundle): the shared
+// subscription-URL precedence rule, also used by the host resolver.
+import { resolveSubscriptionUrls } from '../ip-pool-settings/subscription-urls.ts'
 
 /** The reactive values and commands the Plugins page supplies for this page. */
 export interface ConfigPageForm {
@@ -213,7 +216,13 @@ function servedSection(state: ConfigFormSnapshot<Record<string, unknown>> | unde
   return {
     ...DEFAULTS, ...served,
     free: { ...DEFAULTS.free, ...served?.free },
-    subscription: { ...DEFAULTS.subscription, ...served?.subscription, ...(served?.subscriptions === undefined ? {} : { urls: served.subscriptions }) },
+    // `subscription.urls` is canonical and the legacy flat `subscriptions` is
+    // only a fallback: the shared resolver picks whichever actually carries
+    // URLs. Spreading the flat key on a plain `!== undefined` check would
+    // clobber the nested field with the `[]` schemastery injects into every
+    // `Schema.array()` — which is what made a freshly saved URL render as an
+    // empty list. See subscription-urls.ts.
+    subscription: { ...DEFAULTS.subscription, ...served?.subscription, urls: resolveSubscriptionUrls(served) },
     singbox: { ...DEFAULTS.singbox, ...served?.singbox },
   }
 }
