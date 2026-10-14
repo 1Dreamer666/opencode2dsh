@@ -80,8 +80,8 @@ design.md §9.2 曾把「多出口」定为灰色能力并默认关闭（当时�
 **池子（抓取/验证/状态机）跑在插件本体里**（TS，进程内），出口来源有三类：
 
 1. **免费源抓取**（内建）：用户开启即用，不依赖任何外部服务。免费代理质量烂，所以配套内建验证与准入（§4.5）。
-2. **手动添加的明文 HTTP/SOCKS5 代理**（内建，设置页手填）：几个自备节点直填，undici 原生就拨。其中可标记 **pinned 固定出口**（专线/本机 Clash 场景，§3.6）。
-3. **订阅**（内建，机场/自建 Clash·V2ray 订阅，设置页填 URL）：解析层纯 TS 内建（§1.2.1）；拨号按协议分层——明文节点（http/socks5）直拨，加密节点（vmess/vless/trojan/ss/hysteria2/anytls）需要外部核心转换（§1.2.2）。
+2. **手动添加的明文 HTTP/SOCKS5 代理**（内建，设置页手填）：几个自备节点直填，undici 原生就拨。其中可标记 **pinned 固定出口**（专线/本机 Clash 场景，§3.6）。手填项同样接受 `https://`（见 §1.2.1 的协议保真修订）。
+3. **订阅**（内建，机场/自建 Clash·V2ray 订阅，设置页填 URL）：解析层纯 TS 内建（§1.2.1）；拨号按协议分层——明文节点（http/**https**/socks5）直拨，加密节点（vmess/vless/trojan/ss/hysteria2/anytls）需要外部核心转换（§1.2.2）。
 
 **GoProxy 实例对接（原第 4 来源，2026-09-05 摘牌）**：设计之初它是「必选依赖」→ IP-2/3 内建了免费源抓取与订阅解析后降为「四来源之一」→ **IP-3 交付后其残余价值归零**：三个用户画像里（已有 Clash → pinned 覆盖；已有 GoProxy → 这类用户装 sing-box 单文件零负担，IP-4 覆盖；全新用户 → 它的安装门槛 Go1.25+CGO/Docker 比 sing-box 还高）没有一个需要它。维护成本（API 变动跟随、它与我们不一致的出口质量标准、多一个来源的文档面）> 残余价值。**IP-5 从分期删除**；触发条件记录进 §8 backlog（真实用户反馈「已在跑 GoProxy 且不想装 sing-box」时再补，那是一个 30 行的 API client）。
 
@@ -97,9 +97,13 @@ design.md §9.2 曾把「多出口」定为灰色能力并默认关闭（当时�
 | 协议链接 | vmess://、vless://、trojan://、ss:// 等前缀 | 逐行解析 URI（vmess 是 base64 JSON，其余是 URI 参数） |
 | Base64 | 整体 base64 解码后再按协议链接解析 | 两跳解码 |
 
-解析产物统一为 `ParsedNode { name, type, server, port, raw }`（GoProxy 同构），分两路：`type ∈ {http, socks5}` → 直接进出口表走准入探测；其余 → 待转换清单（§1.2.2）。订阅刷新（默认 30min + 手动）只重拉 URL 重跑解析，断路器同免费源。机场订阅动辄几十节点，准入探测照 §4.5 全链走（机场节点质量参差，冒烟一步不能省）。
+解析产物统一为 `ParsedNode { name, type, server, port, raw }`（GoProxy 同构），分两路：`type ∈ {http, https, socks5}` → 直接进出口表走准入探测；其余 → 待转换清单（§1.2.2）。订阅刷新（默认 30min + 手动）只重拉 URL 重跑解析，断路器同免费源。机场订阅动辄几十节点，准入探测照 §4.5 全链走（机场节点质量参差，冒烟一步不能省）。
 
 拉取请求的 **User-Agent 是设置项**（`subscription.userAgent`，默认 `clash-verge/v2.0`）：机场普遍按 UA 做白名单，不在名单里的 UA 拿回来的是错误页而不是订阅体（实测某机场对 `clash-verge/1.6.0` 返回 502 Bad Gateway，对 `clash-verge/v2.0` 正常）。UA 还可能决定**返回哪种格式**——Clash 形状的 UA 给 `proxies:` YAML，v2ray 形状的给 base64 链接，后者会让所有节点都需要 sing-box 转换。所以换 UA 后要顺带确认解析出的 `detected` 格式与节点数。
+
+**（2026-10-15 修订）`type` 必须保真到拨号层，`https` 不是 `http` 的修饰词。** 直拨分层的判据是 `type ∈ {http, https, socks5}`；`https` 表示**代理自身那一跳套了 TLS**（订阅里写成 `https://host:port`，Clash 里写成 `type: https`），与明文 `http` 是两种线上协议。此前 `parsePlainAddresses` 把 `https` 放行后**没有记住**——`protocol` 保持初始值 `'http'`——于是 `ProxyAgent` 拿到 `http://host:443`，对 TLS 监听器发明文 `CONNECT`；监听器按协议规定直接关闭连接，undici 报 `SocketError: other side closed`（`client-h1.js` `onHttpSocketEnd`，语义是「收到 FIN 且尚无状态行」），§4.2 规则表如实把它判成 dead。实测 118 个出口里 **46 个**是这样死的，端口全在 443/9002/9443，逐个抽样确认 TLS 握手成功、TLS 内 `CONNECT` 回 `200 OK`——**误杀，且杀的是订阅里质量最好的一批**。现在 `https` 作为一等协议（`ExitProtocol`）贯穿解析→建 agent→拨号，`exitProxyUri` 如实产出 `https://`（undici `proxy-agent.js` 只在代理 scheme 为 `https:` 时才把 `CONNECT` 包进 TLS：`forwardConnect = protocol === 'https:'`）。
+
+**https 代理必须带 `proxyTls: { rejectUnauthorized: false }`（实测，不是可选优化）。** 这些出口是 **IP 字面量**，没有主机名可供证书签发，undici 默认 `rejectUnauthorized: true` 会让**每一次**握手失败（实测报 `Secure Proxy Connection failed`）。这里只放弃**代理跳**的身份校验——隧道内到真实目标的 TLS 仍走 undici 正常路径，端到端机密性不变；而 IP 字面量代理本来就没有可校验的身份。这与 sing-box 转换层的做法一致。
 
 #### 1.2.2 订阅拨号层：明文直拨，加密节点需要外部核心
 
