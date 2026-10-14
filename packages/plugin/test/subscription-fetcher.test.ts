@@ -288,8 +288,13 @@ test('a refresh re-smokes only NEW or STALE exits, never the whole table', async
   // each round buried the queue faster than the concurrency cap drained it.
   // Those smokes share the per-exit-IP quota with real traffic — which is how
   // exits showed `ok` while real requests still answered 429.
+  //
+  // Each node must answer with its OWN exit IP: `pool.add` refuses two
+  // addresses sharing one exit IP (§3.1, they are one quota bucket), so a seam
+  // that returns a constant IP silently collapses 40 nodes into one entry —
+  // which then looks "new" forever and hides the very bug under test.
   let smokes = 0
-  const counting = {
+  const perNodeSeam = {
     ProxyAgent: class {
       constructor(opts: { uri: string }) { this.uri = opts.uri }
       uri: string
@@ -297,15 +302,27 @@ test('a refresh re-smokes only NEW or STALE exits, never the whole table', async
       destroy() { return Promise.resolve() }
     },
     request: (async (url: string, init: { dispatcher: { uri: string } }) => {
-      // Every proxied request is an admission smoke (echo or upstream).
       smokes += 1
-      return seamRequest(url, init)
+      const host = init.dispatcher.uri.replace(/^(?:https?|socks5):\/\//, '').split(':')[0] ?? ''
+      const last = Number(host.split('.').pop() ?? '0')
+      if (url.includes('ip-api')) {
+        return {
+          statusCode: 200,
+          body: { text: async () => JSON.stringify({ status: 'success', query: `203.0.113.${last}`, countryCode: 'US', city: 'c', country: 'c' }) },
+        }
+      }
+      return { statusCode: 200, body: { text: async () => '{"ok":true}' } }
     }) as never,
   }
+  const many = ['proxies:']
+  for (let i = 1; i <= 40; i += 1) {
+    many.push(`  - {name: "n${i}", type: http, server: 10.0.0.${i}, port: 8080}`)
+  }
+
   const pool = new ExitPool()
   const prober = new Prober({ pool })
   const fetcher = new SubscriptionFetcher(
-    { pool, prober, undici: counting as never, fetchImpl: (async () => new Response(SUB_BODY)) as unknown as typeof fetch },
+    { pool, prober, undici: perNodeSeam as never, fetchImpl: (async () => new Response(many.join('\n'))) as unknown as typeof fetch },
     { logger: { info: () => {}, warn: () => {} } },
   )
   fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
@@ -313,13 +330,14 @@ test('a refresh re-smokes only NEW or STALE exits, never the whole table', async
   await fetcher.refresh()
   const firstRound = smokes
   assert.ok(firstRound > 0, 'the first refresh probes the new exits')
-  assert.equal(pool.list().length, 2, 'both plaintext nodes are admitted')
+  assert.equal(pool.list().length, 40, 'all 40 nodes enter the table with distinct exit IPs')
 
   // Refreshing again seconds later must do NO probe work: their verdicts are
-  // fresh, so they are neither new nor stale.
+  // fresh, so they are neither new nor stale. Before the fix this was another
+  // full round of smokes — measured at 3 requests per exit.
   smokes = 0
   await fetcher.refresh()
   assert.equal(smokes, 0, 'a second refresh burns no anonymous-lane quota on fresh exits')
-  assert.equal(pool.list().length, 2, 'the table is unchanged, not duplicated')
+  assert.equal(pool.list().length, 40, 'the table is unchanged, not duplicated')
 })
 
