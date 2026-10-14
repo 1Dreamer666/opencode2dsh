@@ -18,6 +18,27 @@
 
 export type ExitSource = 'free' | 'manual' | 'subscription' | 'goproxy'
 
+/**
+ * Why a probe failed, classified at the failure site (docs/ip-pool.md §4.2
+ * rule table). Declared HERE rather than in admission.ts because it is part
+ * of the pool's own vocabulary — `ExitHealth` records it — and admission.ts
+ * already imports this module, so the other direction would be circular.
+ *
+ * Only `transport` legitimately means "this link is dead" (dial failure,
+ * SOCKS5 handshake failure, timeout, socket reset — the node never answered).
+ * Every other class means the exit DID answer, so striking it dead would kill
+ * a working route. Live-observed 2026-10-14: 23 of 24 sampled subscription
+ * failures were `transport`, 1 was a refusal.
+ */
+export type ProbeFailure =
+  | 'transport'
+  | 'refused'
+  | 'server-error'
+  | 'quota'
+  | 'geo-blocked'
+  | 'slow'
+  | 'malformed'
+
 export interface ExitNode {
   /** host:port, unique inside the pool (the address we dial). */
   id: string
@@ -35,7 +56,6 @@ export interface ExitNode {
 
 export type ExitState = 'unknown' | 'ok' | 'dead'
 export type BanState = 'ok' | 'suspect' | 'banned'
-
 interface ExitHealth {
   state: ExitState
   lastProbedAt: number
@@ -46,6 +66,16 @@ interface ExitHealth {
   inflight: boolean
   /** Consecutive dead rechecks; eviction after deadEvictions (3.5). */
   deadStrikes: number
+  /**
+   * Why the last probe failed, classified (see probe-verdict.ts). Empty means
+   * the exit has never failed a probe. This is what separates "never probed"
+   * from "probed and the link was gone" on the settings card — live-observed
+   * 2026-10-14, 703 of 726 subscription exits rendered as the same
+   * "未探活" whether or not a probe had ever run against them.
+   */
+  lastProbeFailure: ProbeFailure | ''
+  /** Human-readable detail for the same failure (diagnostics only). */
+  lastProbeReason: string
 }
 
 interface ModelBan {
@@ -147,6 +177,8 @@ export class ExitPool {
         cooldownUntil: 0,
         inflight: false,
         deadStrikes: 0,
+        lastProbeFailure: '',
+        lastProbeReason: '',
       })
     }
     return true
@@ -201,6 +233,7 @@ export class ExitPool {
     if (!health) return
     health.state = 'dead'
     health.inflight = false
+    if (health.lastProbeFailure === '') health.lastProbeFailure = 'transport'
   }
 
   #clearPinnedIf(id: string): void {
@@ -245,10 +278,32 @@ export class ExitPool {
       health.consecutiveLimited = 0
       health.cooldownUntil = 0
       health.deadStrikes = 0
+      // A passing probe clears the failure record: "last probe failed" must
+      // never outlive the probe that superseded it.
+      health.lastProbeFailure = ''
+      health.lastProbeReason = ''
     }
     if (model !== undefined) {
       this.#setBan(id, model, { state: 'ok', bannedAt: 0, consecutiveFailures: 0 })
     }
+  }
+
+  /**
+   * Record a failed probe's class + reason without touching health.
+   *
+   * Split out of the mark* family deliberately: several failure classes
+   * (server-error, geo-blocked, slow, malformed) must leave the exit's health
+   * EXACTLY as it was — the node answered, it just could not serve this probe
+   * — yet the settings card still needs to show "probed, and here is why it
+   * did not pass" instead of the indistinguishable 未探活. The single
+   * write path keeps `lastProbeFailure` and `lastProbeReason` consistent.
+   */
+  markProbeFailure(id: string, failure: ProbeFailure, reason = ''): void {
+    const health = this.#health.get(id)
+    if (!health) return
+    health.lastProbedAt = this.#now()
+    health.lastProbeFailure = failure
+    health.lastProbeReason = reason
   }
 
   /** 429: exit-level cooldown with exponential backoff (3.2 / 4.6). */
@@ -257,6 +312,13 @@ export class ExitPool {
     if (!health) return 0
     health.consecutiveLimited += 1
     health.state = 'ok'
+    // A 429 is a VERIFIED-ALIVE verdict (the request reached the upstream and
+    // came back metered), so it supersedes any older failure record — a stale
+    // "probe failed" label next to a cooling-but-working exit would be a lie.
+    // The echo-step 429 goes through markProbeFailure AFTER this call, so that
+    // narrower case still records itself.
+    health.lastProbeFailure = ''
+    health.lastProbeReason = ''
     const backoff = Math.min(
       this.#cooldownBase * 2 ** (health.consecutiveLimited - 1),
       this.#cooldownMax,
@@ -286,14 +348,21 @@ export class ExitPool {
   }
 
   /** Transport failure / 5xx / probe timeout: dead, with free-source eviction
-   *  after repeated strikes (3.5). Returns true when the node was evicted. */
-  markDeadStrike(id: string): boolean {
+   *  after repeated strikes (3.5). Returns true when the node was evicted.
+   *
+   *  This is the ONLY source-dependent rule in the health model (docs 3.5):
+   *  a dead `free` node is dropped so its slot can be refilled, while a dead
+   *  manual/subscription node is disabled in place and re-probed by
+   *  `PeriodicProber`. The verdict itself — that the link is gone — is uniform. */
+  markDeadStrike(id: string, reason = ''): boolean {
     const node = this.#nodes.get(id)
     const health = this.#health.get(id)
     if (!node || !health) return false
     health.state = 'dead'
     health.inflight = false
     health.deadStrikes += 1
+    health.lastProbeFailure = 'transport'
+    if (reason !== '') health.lastProbeReason = reason
     if (node.source === 'free' && health.deadStrikes >= this.#deadEvictions) {
       this.remove(id)
       return true

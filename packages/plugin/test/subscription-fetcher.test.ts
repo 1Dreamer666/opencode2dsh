@@ -85,6 +85,79 @@ test('subscription refresh: plaintext nodes smoke into the pool, encrypted park 
   assert.equal(state.lastError, '')
 })
 
+test('subscription refresh: a plaintext node whose link is gone is marked dead, not left unprobed', async () => {
+  // The live regression (2026-10-14): 703 of 726 subscription exits sat at
+  // 'unknown' with zero facts after a full probe sweep. They had all been
+  // probed — this path just never wrote anything on failure, so a
+  // verified-dead link was indistinguishable from a never-probed node, both on
+  // the settings card and in the rotation (isUsable treats 'unknown' as usable).
+  const failing = {
+    ProxyAgent: class {
+      constructor(opts: { uri: string }) { this.uri = opts.uri }
+      uri: string
+      close() { return Promise.resolve() }
+    },
+    // Every request through a candidate dies at the dial: transport class.
+    request: (async () => { throw new Error('other side closed') }) as never,
+  }
+  const pool = new ExitPool()
+  const prober = new Prober({ pool })
+  const fetcher = new SubscriptionFetcher(
+    { pool, prober, undici: failing as never, fetchImpl: (async () => new Response(SUB_BODY)) as unknown as typeof fetch },
+    { logger: { info: () => {}, warn: () => {} } },
+  )
+  fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
+  await fetcher.refresh()
+
+  const rows = pool.list()
+  assert.ok(rows.length >= 2, 'the plaintext nodes are still kept in the table')
+  for (const row of rows) {
+    assert.equal(row.health.state, 'dead', `${row.id} must be dead, not silently unprobed`)
+    assert.equal(row.health.lastProbeFailure, 'transport')
+  }
+  // and therefore out of the rotation
+  assert.equal(pool.isUsable(rows[0]!.id, 'space-bunny-free'), false)
+})
+
+test('subscription refresh: a refused probe keeps the exit alive instead of striking it dead', async () => {
+  // 403 at the tunnel step: the exit works, this model is not served here
+  // (§4.2). Striking it dead — what the old blanket failure handling did on
+  // the probeAll path — would kill a working route.
+  const refusing = {
+    ProxyAgent: class {
+      constructor(opts: { uri: string }) { this.uri = opts.uri }
+      uri: string
+      close() { return Promise.resolve() }
+    },
+    request: (async (url: string, init: { dispatcher: { uri: string } }) => {
+      if (url.includes('ip-api')) {
+        // Distinct exit IP per candidate: two addresses sharing one exit IP are
+        // one quota bucket and pool.add() correctly refuses the second (§3.1).
+        const address = init.dispatcher.uri.replace(/^https?:\/\//, '')
+        return { statusCode: 200, body: { text: async () => JSON.stringify({ status: 'success', query: `8.8.${address.length}.1`, countryCode: 'US', city: 'c', country: 'c' }) } }
+      }
+      return { statusCode: 403, body: { text: async () => '{}' } }
+    }) as never,
+  }
+  const pool = new ExitPool()
+  const prober = new Prober({ pool })
+  const fetcher = new SubscriptionFetcher(
+    { pool, prober, undici: refusing as never, fetchImpl: (async () => new Response(SUB_BODY)) as unknown as typeof fetch },
+    { logger: { info: () => {}, warn: () => {} } },
+  )
+  fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
+  await fetcher.refresh()
+
+  const rows = pool.list()
+  assert.ok(rows.length >= 2)
+  for (const row of rows) {
+    assert.notEqual(row.health.state, 'dead', `${row.id} answered — it must not be dead`)
+    assert.equal(row.health.lastProbeFailure, 'refused')
+    // one refusal is only 'suspect'; the exit stays usable for other models
+    assert.equal(pool.isUsable(row.id, 'other-model'), true)
+  }
+})
+
 test('subscription fetch failures are reported, never thrown', async () => {
   const { fetcher } = makeFetcher((async () => { throw new Error('ETIMEDOUT') }) as unknown as typeof fetch)
   fetcher.setUrls(['https://dead.example.com/sub'])

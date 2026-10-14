@@ -20,7 +20,8 @@
 
 import { ExitPool, type ExitNode } from './pool.ts'
 import { Prober, type ProbeTask } from './prober.ts'
-import { admitCandidate, admitTrusted, type AdmissionDeps } from './admission.ts'
+import { admitTrusted, type AdmissionDeps } from './admission.ts'
+import { applyProbeVerdict } from './probe-verdict.ts'
 import { parseSubscription, type ParsedNode } from './subscription.ts'
 import { DEFAULT_SUBSCRIPTION_USER_AGENT, normalizeSubscriptionUserAgent } from './subscription-defaults.ts'
 import { SingBoxSupervisor, type ConvertedExit } from './singbox.ts'
@@ -229,10 +230,18 @@ export class SubscriptionFetcher {
                 : {})
               if (!this.#stopped && verdict.admitted && verdict.node) {
                 const isNew = this.#deps.pool.add({ ...verdict.node, addedAt: existing?.addedAt ?? verdict.node.addedAt })
-                // A node that only entered through the degraded fallback (its
-                // smoke never succeeded) stays 'unknown': markOk here is what
-                // let never-answering exits outrank healthy ones in pick().
-                if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
+                // The verdict layer decides what the probe MEANT. A degraded
+                // fallback is no longer a silent dead end: it carries the
+                // failure class, so a link that is genuinely gone is marked
+                // dead (excluded from rotation, re-probed by PeriodicProber)
+                // while a node that merely refused this probe keeps its health.
+                // Live-observed 2026-10-14: 703 of 726 exits sat at 'unknown'
+                // with no facts because this path never wrote anything on
+                // failure — they looked identical to never-probed nodes.
+                applyProbeVerdict(this.#deps.pool, exit.address, verdict, {
+                  source: 'subscription',
+                  model: this.#deps.smokeModel ?? 'big-pickle',
+                })
                 if (!known.has(exit.address) && isNew) {
                   this.#state.convertedAdmitted += 1
                 }
@@ -270,9 +279,14 @@ export class SubscriptionFetcher {
             : {})
           if (!this.#stopped && verdict.admitted && verdict.node) {
             const isNew = !existing
-            // add() refreshes the facts; health is only promoted on a real pass.
+            // add() refreshes the facts; the verdict layer owns the health
+            // write, so a plaintext node whose link died is marked dead here
+            // too (previously it silently stayed 'unknown' forever).
             this.#deps.pool.add(isNew ? verdict.node : { ...verdict.node, addedAt: existing.addedAt })
-            if (!verdict.degraded) this.#deps.pool.markOk(verdict.node.id)
+            applyProbeVerdict(this.#deps.pool, verdict.node.id, verdict, {
+              source: 'subscription',
+              model: this.#deps.smokeModel ?? 'big-pickle',
+            })
             if (isNew) this.#state.plaintextAdmitted += 1
           }
         },

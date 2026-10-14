@@ -21,7 +21,7 @@ import type { Dispatcher } from 'undici'
 import { ZEN_BASE_URL } from '../adapter/catalog.ts'
 import { FREE_LANE_GATE_TOOL_NAMES, freeLaneGateTool } from '../adapter/messages.ts'
 import { canonicalSessionID, disguiseHeaders, opencodeUserAgent, randomID, stableID } from '../adapter/ids.ts'
-import { gradeOf, type ExitNode, type ExitPool } from './pool.ts'
+import { gradeOf, type ExitNode, type ExitPool, type ProbeFailure } from './pool.ts'
 import { exitProxyUri } from './dispatcher.ts'
 
 export interface AdmissionDeps {
@@ -48,6 +48,48 @@ export interface EchoFacts {
 }
 
 /**
+ * Why a probe/admission attempt failed, classified at the point of failure
+ * rather than parsed back out of the human-readable `reason` string.
+ *
+ * The distinction that matters (live-observed 2026-10-14, 24 sampled exits of a
+ * 726-node subscription pool): 23 of them failed with a transport error
+ * (`SOCKS5 connection timeout`, `other side closed`, `probe timed out`) while
+ * ONE answered `echo HTTP 400`. The first group is a dead link; the second is
+ * a live node that refused THIS probe. Collapsing both into "failure ⇒ dead"
+ * is what made 703 verified-dead exits and a handful of merely-refused ones
+ * indistinguishable — and, worse, would strike a working node dead.
+ *
+ * The union itself lives in pool.ts (ExitHealth records it); re-exported here
+ * so admission consumers keep importing it from one place.
+ *
+ * docs/ip-pool.md §4.2 rule table, now with an explicit failure class per row:
+ *   transport   → dead          (§4.2 "5xx / 传输错误 / 超时"; note the 5xx-from-
+ *                               upstream split below, which the passive path
+ *                               already made on 2026-09-09)
+ *   refused     → (exit, model) ban, exit stays alive (§4.2 401/403)
+ *   server-error→ no health change (§4.2 5xx; upstream's fault, not the link's)
+ *   quota       → exit-level cooldown (§4.2 429)
+ *   geo-blocked → no health change (step-2 policy, link is fine)
+ *   slow        → no health change (link is fine, gate was maxResponseMs)
+ *   malformed   → no health change (node answered, body unusable)
+ */
+export type { ProbeFailure } from './pool.ts'
+
+/** Classify an echo-step HTTP status (ip-api answered through the candidate). */
+function classifyEchoStatus(statusCode: number): ProbeFailure {
+  if (statusCode === 429) return 'quota'
+  if (statusCode >= 500) return 'server-error'
+  return 'refused'
+}
+
+/** Classify an upstream (Zen) HTTP status; 429 is a quota verdict, not a refusal. */
+function classifyUpstreamStatus(statusCode: number): ProbeFailure {
+  if (statusCode === 429) return 'quota'
+  if (statusCode >= 500) return 'server-error'
+  return 'refused'
+}
+
+/**
  * Coarse screen (admission steps 1+2, docs/ip-pool.md 4.5 修订): one request
  * through the candidate to the ip echo. This step touches only the wild
  * candidate and a public IP service — never the anonymous lane — so callers
@@ -59,7 +101,7 @@ export async function coarseScreen(
   deps: Pick<AdmissionDeps, 'undici' | 'ipEchoUrl' | 'blockedCountries' | 'logger'>,
   candidate: { address: string; protocol: 'http' | 'socks5' },
   options: { relaxed?: boolean; pinned?: boolean; timeoutMs?: number } = {},
-): Promise<EchoFacts | { rejected: string }> {
+): Promise<EchoFacts | { rejected: string; failure?: ProbeFailure }> {
   const ipEcho = deps.ipEchoUrl ?? DEFAULT_IP_ECHO
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const blocked = new Set(deps.blockedCountries ?? ['CN'])
@@ -72,7 +114,7 @@ export async function coarseScreen(
     // makes undici's ProxyAgent throw InvalidArgumentError.
     agent = new deps.undici.ProxyAgent({ uri: exitProxyUri(candidate.address, candidate.protocol) })
   } catch (err) {
-    return { rejected: `agent-build: ${err instanceof Error ? err.message : String(err)}` }
+    return { rejected: `agent-build: ${err instanceof Error ? err.message : String(err)}`, failure: 'malformed' }
   }
   try {
     const started = Date.now()
@@ -82,18 +124,22 @@ export async function coarseScreen(
       'probe',
     )
     const latencyMs = Date.now() - started
-    if (echo.statusCode !== 200) return { rejected: `echo HTTP ${echo.statusCode}` }
+    if (echo.statusCode !== 200) {
+      return { rejected: `echo HTTP ${echo.statusCode}`, failure: classifyEchoStatus(echo.statusCode) }
+    }
     let body: EchoResponse
     try {
       body = JSON.parse(await echo.body.text()) as EchoResponse
     } catch {
-      return { rejected: 'echo body not JSON' }
+      return { rejected: 'echo body not JSON', failure: 'malformed' }
     }
-    if (body.status !== 'success' || !body.query) return { rejected: 'echo did not report an exit IP' }
+    if (body.status !== 'success' || !body.query) {
+      return { rejected: 'echo did not report an exit IP', failure: 'malformed' }
+    }
     const country = body.countryCode?.toUpperCase() ?? ''
-    if (blocked.has(country)) return { rejected: `geo-blocked ${country}` }
+    if (blocked.has(country)) return { rejected: `geo-blocked ${country}`, failure: 'geo-blocked' }
     if (latencyMs > maxResponseMs && !options.pinned) {
-      return { rejected: `latency ${latencyMs}ms > ${maxResponseMs}ms` }
+      return { rejected: `latency ${latencyMs}ms > ${maxResponseMs}ms`, failure: 'slow' }
     }
     return {
       exitIP: body.query,
@@ -101,7 +147,9 @@ export async function coarseScreen(
       latencyMs,
     }
   } catch (err) {
-    return { rejected: err instanceof Error ? err.message : String(err) }
+    // Dial failure, SOCKS5 handshake failure, timeout, socket reset: the link
+    // itself is gone. This is the class that legitimately means "dead".
+    return { rejected: err instanceof Error ? err.message : String(err), failure: 'transport' }
   } finally {
     void agent.close().catch(() => {})
   }
@@ -186,6 +234,14 @@ export interface AdmissionResult {
    */
   facts?: EchoFacts
   /**
+   * WHY the attempt failed, classified at the failure site (see ProbeFailure).
+   * `undefined` means the attempt never got far enough to classify (agent
+   * construction threw before any request). Callers MUST branch on this rather
+   * than on `admitted`/the reason string: `transport` is the only class that
+   * legitimately means "this link is dead".
+   */
+  failure?: ProbeFailure
+  /**
    * Admitted WITHOUT clearing the full chain (the trusted/pinned fallback).
    * The address keeps its pool slot so a later probe can revisit it, but its
    * health is UNKNOWN — callers must not markOk it, or a node that never
@@ -247,7 +303,7 @@ export async function admitCandidate(
       facts = options.echoFacts
     } else {
       const verdict = await coarseScreen(deps, candidate, options)
-      if ('rejected' in verdict) return { admitted: false, reason: verdict.rejected }
+      if ('rejected' in verdict) return { admitted: false, reason: verdict.rejected, failure: verdict.failure }
       facts = verdict
     }
 
@@ -259,7 +315,12 @@ export async function admitCandidate(
       // facts ride along: steps 1+2 succeeded, so the exit IP and latency are
       // REAL even though the tunnel step refused. Dropping them here is what
       // made the trusted fallback store placeholders (see AdmissionResult.facts).
-      return { admitted: false, reason: `zen models HTTP ${models.statusCode}`, facts }
+      return {
+        admitted: false,
+        reason: `zen models HTTP ${models.statusCode}`,
+        failure: classifyUpstreamStatus(models.statusCode),
+        facts,
+      }
     }
 
     // Step 4: anonymous-lane smoke (streaming, 1 token). The free lane
@@ -313,7 +374,7 @@ export async function admitCandidate(
           },
         }
       }
-      return { admitted: false, reason: `zen smoke HTTP ${smoke.statusCode}`, facts }
+      return { admitted: false, reason: `zen smoke HTTP ${smoke.statusCode}`, failure: classifyUpstreamStatus(smoke.statusCode), facts }
     }
 
     return {
@@ -331,7 +392,9 @@ export async function admitCandidate(
       },
     }
   } catch (err) {
-    return { admitted: false, reason: err instanceof Error ? err.message : String(err) }
+    // Transport-level: the request never produced a response (dial failure,
+    // SOCKS5 handshake, timeout, reset). The only class that means "dead".
+    return { admitted: false, reason: err instanceof Error ? err.message : String(err), failure: 'transport' }
   } finally {
     void agent.close().catch(() => {})
   }
@@ -368,6 +431,12 @@ export async function admitTrusted(
     admitted: true,
     degraded: true,
     reason: result.reason,
+    // Carried through unchanged: the trusted fallback keeps the address in the
+    // table, but it must NOT be a black box for the caller. Without this the
+    // caller could only see "degraded", which is what let 703 verified-dead
+    // subscription exits sit in the table indistinguishable from genuinely
+    // unprobed ones (live-observed 2026-10-14).
+    failure: result.failure,
     facts: result.facts,
     node: {
       id: candidate.address,

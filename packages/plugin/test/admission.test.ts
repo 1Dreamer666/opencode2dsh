@@ -84,29 +84,33 @@ test('admission: the four-step happy path admits with exit facts and grade', asy
 })
 
 test('admission: fail-fast at each step (echo/geo/latency/models/smoke)', async () => {
-  // step 1-2: non-200 echo
+  // step 1-2: non-200 echo. 5xx is the echo service's fault, never the link's.
   let transport = fakeTransport({ ...okScript(), [ECHO_URL]: { status: 503, body: '' } })
   let result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' })
   assert.ok(!result.admitted)
   assert.match(result.reason!, /echo HTTP 503/)
+  assert.equal(result.failure, 'server-error')
 
-  // step 2: echo without an exit IP
+  // step 2: echo without an exit IP — an unreadable body, not a dead link
   transport = fakeTransport({ ...okScript(), [ECHO_URL]: { status: 200, body: '{"status":"fail"}' } })
   result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' })
   assert.ok(!result.admitted)
   assert.match(result.reason!, /exit IP/)
+  assert.equal(result.failure, 'malformed')
 
-  // step 2: geo-blocked country
+  // step 2: geo-blocked country — policy, the link demonstrably works
   transport = fakeTransport({ ...okScript(), [ECHO_URL]: { status: 200, body: echoBody('5.5.5.5', 'CN') } })
   result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' }, { timeoutMs: 1000 })
   assert.ok(!result.admitted)
   assert.match(result.reason!, /geo-blocked CN/)
+  assert.equal(result.failure, 'geo-blocked')
 
-  // step 3: HTTPS tunnel to the real upstream fails
+  // step 3: HTTPS tunnel to the real upstream fails (403 = refusal, not death)
   transport = fakeTransport({ ...okScript(), [MODELS_URL]: { status: 403, body: '' } })
   result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' }, { timeoutMs: 1000 })
   assert.ok(!result.admitted)
   assert.match(result.reason!, /zen models HTTP 403/)
+  assert.equal(result.failure, 'refused')
 
   // step 4: anonymous-lane smoke 429 -> admitted with `limited` (good exit,
   // quota consumed elsewhere; the caller cools it, docs 4.5)
@@ -121,6 +125,14 @@ test('admission: fail-fast at each step (echo/geo/latency/models/smoke)', async 
   result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' }, { timeoutMs: 1000 })
   assert.ok(!result.admitted)
   assert.match(result.reason!, /zen smoke HTTP 403/)
+  assert.equal(result.failure, 'refused')
+
+  // step 4: an upstream 5xx is the MODEL failing behind a healthy exit — the
+  // class the passive path already refused to strike dead (2026-09-09)
+  transport = fakeTransport({ ...okScript(), [CHAT_URL]: { status: 500, body: '' } })
+  result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' }, { timeoutMs: 1000 })
+  assert.ok(!result.admitted)
+  assert.equal(result.failure, 'server-error')
 
   // the smoke body must satisfy the free-lane gate (issue #56): streaming,
   // bash+read stubs call-disabled, and a canonical ses_* session header
@@ -169,6 +181,25 @@ test('admission: trusted sources are admitted with warnings even on failure', as
   assert.ok(warnings.some((line) => line.includes('leased:1')))
 })
 
+test('admission: the trusted fallback carries the failure CLASS, not just "degraded"', async () => {
+  // Without this the caller cannot tell a dead link from a refused probe, which
+  // is exactly how 703 verified-dead subscription exits ended up looking
+  // identical to never-probed ones (live-observed 2026-10-14).
+  const refused = await admitTrusted(
+    { ...deps(fakeTransport({ [ECHO_URL]: { status: 200, body: echoBody('5.5.5.5', 'JP') }, [MODELS_URL]: { status: 403, body: '' } })), logger: { warn: () => {} } },
+    { address: 'sub:1', protocol: 'http', source: 'subscription' },
+  )
+  assert.equal(refused.degraded, true)
+  assert.equal(refused.failure, 'refused', 'a 403 is a refusal, NOT a dead link')
+
+  const dead = await admitTrusted(
+    { ...deps(fakeTransport({ '*': new Error('SOCKS5 connection timeout') })), logger: { warn: () => {} } },
+    { address: '127.0.0.1:30001', protocol: 'socks5', source: 'subscription' },
+  )
+  assert.equal(dead.degraded, true)
+  assert.equal(dead.failure, 'transport', 'a dial timeout IS a dead link')
+})
+
 test('admission: a failed trusted smoke never invents a fast, top-grade exit', async () => {
   // Live regression (2026-10-13): all 470 subscription nodes failed to convert,
   // every smoke failed, and the fallback stamped each node
@@ -198,6 +229,7 @@ test('admission: facts measured in steps 1-2 survive a later step failing', asyn
   assert.equal(failed.admitted, false)
   assert.equal(failed.reason, 'zen models HTTP 403')
   assert.equal(failed.facts?.exitIP, '203.0.113.9', 'steps 1+2 facts must survive the step-3 refusal')
+  assert.equal(failed.failure, 'refused', 'the class must survive alongside the facts')
 
   const trusted = await admitTrusted(
     { ...deps(transport), logger: { warn: () => {} } },

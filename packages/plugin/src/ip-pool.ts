@@ -285,6 +285,7 @@ export async function startIpPool(
   const probeAll = async (): Promise<number> => {
     const models = probeModels.length > 0 ? probeModels : ['big-pickle']
     const { admitCandidate, admitTrusted } = await import('./pool/admission.ts')
+    const { applyProbeVerdict } = await import('./pool/probe-verdict.ts')
     const tasks = pool.list().map((entry): import('./pool/prober.ts').ProbeTask => ({
       exitId: entry.id,
       kind: 'probe-all',
@@ -311,16 +312,20 @@ export async function startIpPool(
           if (verdict.admitted && verdict.node) {
             // Refresh the node's facts (admission re-measured them).
             pool.add({ ...entry, ...verdict.node, pinned: entry.pinned })
-            // A degraded verdict means the probe never verified this exit:
-            // markOk would promote it to 'ok' on no evidence (the 2026-10-13
-            // regression). Leave the health alone so it stays excluded from the
-            // front of the rotation until a probe genuinely passes.
-            if (verdict.limited) pool.markLimited(entry.id)
-            else if (!verdict.degraded) pool.markOk(entry.id, model)
-          } else {
-            pool.markDeadStrike(entry.id)
-            break
           }
+          // ONE verdict path for every source (probe-verdict.ts). It derives the
+          // health write from the failure CLASS, so a refused probe no longer
+          // strikes a working exit dead (the old blanket `else markDeadStrike`)
+          // and a genuinely dead link no longer lingers as 'unknown'.
+          const applied = applyProbeVerdict(pool, entry.id, verdict, {
+            source: entry.source,
+            model,
+            pinned: entry.pinned,
+          })
+          if (!verdict.admitted) break
+          // An admitted-but-unverified verdict is no reason to burn the NEXT
+          // model's quota on the same broken link.
+          if (verdict.degraded && applied !== 'limited') break
         }
       },
     }))
@@ -335,6 +340,7 @@ export async function startIpPool(
     run: async () => {
       const models = probeModels.length > 0 ? [...probeModels] : ['big-pickle']
       const { admitCandidate, admitTrusted } = await import('./pool/admission.ts')
+      const { applyProbeVerdict } = await import('./pool/probe-verdict.ts')
       for (const model of models) {
         admissionDeps.smokeModel = model
         const verdict = entry.source === 'free'
@@ -346,13 +352,15 @@ export async function startIpPool(
           }, { pinned: entry.pinned, previous: { exitIP: entry.exitIP, exitLocation: entry.exitLocation, latencyMs: entry.latencyMs, quality: entry.quality } })
         if (verdict.admitted && verdict.node) {
           pool.add({ ...entry, ...verdict.node, pinned: entry.pinned })
-          // Same rule as probeAll: only a verified probe may promote an exit.
-          if (verdict.limited) pool.markLimited(entry.id)
-          else if (!verdict.degraded) pool.markOk(entry.id, model)
-        } else {
-          pool.markDeadStrike(entry.id)
-          break
         }
+        // Same shared verdict as probeAll / the subscription fetcher.
+        const applied = applyProbeVerdict(pool, entry.id, verdict, {
+          source: entry.source,
+          model,
+          pinned: entry.pinned,
+        })
+        if (!verdict.admitted) break
+        if (verdict.degraded && applied !== 'limited') break
       }
     },
   })
