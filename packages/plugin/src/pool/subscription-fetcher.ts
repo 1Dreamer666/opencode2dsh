@@ -70,6 +70,20 @@ export interface SubscriptionOptions {
   logger?: { info(message: string): void; warn(message: string): void }
 }
 
+/** How stale a known exit's last probe must be before a refresh re-smokes it.
+ *  A refresh used to re-smoke EVERY converted exit unconditionally, so a pool
+ *  of a few hundred exits re-enqueued a few hundred anonymous-lane smokes on
+ *  every round. Measured live (2026-10-15): `enqueued` climbed past 2600 with
+ *  only 400 exits in the table and a 6-hour refresh interval, because each
+ *  round re-queued the whole table while the queue drained at ~2.5/s under the
+ *  concurrency cap. Those smokes share the per-exit-IP anonymous quota with real
+ *  traffic, which is what produced OK-looking exits that still answered 429. */
+const RESMOKE_AFTER_MS = 30 * 60_000
+
+/** Hard cap on smokes one refresh round may queue, so no future path can
+ *  rebuild the pile-up this ceiling exists to stop. */
+const MAX_SMOKES_PER_ROUND = 60
+
 export class SubscriptionFetcher {
   readonly #deps: SubscriptionDeps
   #urls: string[] = []
@@ -206,15 +220,24 @@ export class SubscriptionFetcher {
     }
     // Encrypted nodes -> sing-box conversion -> local SOCKS5 exits (IP-4).
     // Without a supervisor configured they stay parked as pending.
+    //
+    // The incremental rule below is shared by BOTH the converted and the
+    // plaintext path: re-smoke a node only when it is new or its last verdict
+    // has gone stale. Re-smoking the whole table on every round is what buried
+    // the probe queue (see RESMOKE_AFTER_MS).
+    const now = Date.now()
+    const entries = this.#deps.pool.list()
+    const known = new Set(entries.map((entry) => entry.id))
+    const stale = new Set(entries
+      .filter((entry) => now - entry.health.lastProbedAt >= RESMOKE_AFTER_MS)
+      .map((entry) => entry.id))
     if (pending.length > 0 && this.#deps.supervisor) {
       try {
         const exits = await this.#deps.supervisor.reload(pending)
         if (this.#stopped) return
-        // Nodes already in the table are re-smoked, not skipped: a converted
-        // exit that failed its first smoke used to stay factless forever,
-        // because this filter dropped anything already present.
-        const known = new Set(this.#deps.pool.list().map((entry) => entry.id))
         const tasks: ProbeTask[] = exits
+          .filter((exit) => !known.has(exit.address) || stale.has(exit.address))
+          .slice(0, MAX_SMOKES_PER_ROUND)
           .map((exit): ProbeTask => ({
             exitId: exit.address,
             kind: 'subscription-smoke',
@@ -246,9 +269,11 @@ export class SubscriptionFetcher {
                   this.#state.convertedAdmitted += 1
                 }
                 const served = exit.node
-                this.#state.pendingConversion = this.#state.pendingConversion.filter(
-                  (node) => node !== served,
-                )
+                // Drop the served node by identity, not by value: this ran
+                // once per converted exit, and filtering 1900+ pending nodes
+                // by value inside every task was quadratic in the round.
+                const at = this.#state.pendingConversion.indexOf(served)
+                if (at >= 0) this.#state.pendingConversion.splice(at, 1)
               }
             },
           }))
@@ -262,8 +287,12 @@ export class SubscriptionFetcher {
     }
     // Plaintext nodes go through the trusted admission smoke (never the
     // hot coarse screen: subscription nodes are paid resources, docs 4.1).
+    // Same incremental rule as the converted path above: a node already
+    // smoked recently keeps its verdict until it goes stale.
     if (this.#stopped) return
     const tasks: ProbeTask[] = plaintext
+      .filter((candidate) => !known.has(candidate.address) || stale.has(candidate.address))
+      .slice(0, MAX_SMOKES_PER_ROUND)
       .map((candidate): ProbeTask => ({
         exitId: candidate.address,
         kind: 'subscription-smoke',
