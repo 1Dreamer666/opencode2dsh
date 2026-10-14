@@ -19,6 +19,14 @@
 export type ExitSource = 'free' | 'manual' | 'subscription' | 'goproxy'
 
 /**
+ * Transport used to reach the exit. `https` is an HTTP proxy whose OWN hop is
+ * TLS-wrapped (`https://host:port` in a subscription) — a different wire
+ * protocol from plaintext `http`, not a cosmetic variant. Conflating the two
+ * is a measured defect, not a style choice; see dispatcher.exitProxyUri.
+ */
+export type ExitProtocol = 'http' | 'https' | 'socks5'
+
+/**
  * Why a probe failed, classified at the failure site (docs/ip-pool.md §4.2
  * rule table). Declared HERE rather than in admission.ts because it is part
  * of the pool's own vocabulary — `ExitHealth` records it — and admission.ts
@@ -42,7 +50,7 @@ export type ProbeFailure =
 export interface ExitNode {
   /** host:port, unique inside the pool (the address we dial). */
   id: string
-  protocol: 'http' | 'socks5'
+  protocol: ExitProtocol
   source: ExitSource
   /** Fixed primary exit (docs/ip-pool.md 3.6). */
   pinned: boolean

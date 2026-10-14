@@ -17,7 +17,7 @@ import type { Opencode2dshConfig } from './config.ts'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { ExitPool, gradeOf, type ExitNode } from './pool/pool.ts'
+import { ExitPool, gradeOf, type ExitNode, type ExitProtocol } from './pool/pool.ts'
 import type { UndiciSeam } from './pool/dispatcher.ts'
 import type { AdmissionDeps } from './pool/admission.ts'
 import { Prober } from './pool/prober.ts'
@@ -35,7 +35,7 @@ function dataDir(): string {
 /** Parse one manual proxy string into an exit id + protocol, or null. */
 export function parseManualProxy(
   entry: string,
-): { id: string; protocol: 'http' | 'socks5' } | null {
+): { id: string; protocol: ExitProtocol } | null {
   const trimmed = entry.trim()
   if (trimmed === '') return null
   const schemeMatch = /^([a-z0-9+.-]+):\/\//i.exec(trimmed)
@@ -43,7 +43,15 @@ export function parseManualProxy(
   const rest = schemeMatch ? trimmed.slice(schemeMatch[0].length) : trimmed
   if (!/^\[[^\]]+\]|[^:]+:\d{1,5}$/.test(rest)) return null
   if (scheme !== undefined && scheme !== 'http' && scheme !== 'socks5' && scheme !== 'https' && scheme !== 'socks4' && scheme !== 'socks5h') return null
-  const protocol = scheme === 'socks5' || scheme === 'socks4' || scheme === 'socks5h' ? 'socks5' : 'http'
+  // `https` must survive as itself: an https:// manual proxy dialed as
+  // plaintext gets its connection dropped before any status line, which the
+  // rule table reads as a dead link (measured 2026-10-15 — see
+  // dispatcher.exitProxyUri).
+  const protocol: ExitProtocol = scheme === 'socks5' || scheme === 'socks4' || scheme === 'socks5h'
+    ? 'socks5'
+    : scheme === 'https'
+      ? 'https'
+      : 'http'
   return { id: trimmed, protocol }
 }
 

@@ -21,13 +21,15 @@ import type { Dispatcher } from 'undici'
 import { ZEN_BASE_URL } from '../adapter/catalog.ts'
 import { FREE_LANE_GATE_TOOL_NAMES, freeLaneGateTool } from '../adapter/messages.ts'
 import { canonicalSessionID, disguiseHeaders, opencodeUserAgent, randomID, stableID } from '../adapter/ids.ts'
-import { gradeOf, type ExitNode, type ExitPool, type ProbeFailure } from './pool.ts'
-import { exitProxyUri } from './dispatcher.ts'
+import { gradeOf, type ExitNode, type ExitPool, type ExitProtocol, type ProbeFailure } from './pool.ts'
+import { exitProxyUri, httpsProxyOptions } from './dispatcher.ts'
 
 export interface AdmissionDeps {
   pool: ExitPool
   undici: {
-    ProxyAgent: new (options: { uri: string; clientFactory?: (origin: URL | string, options?: unknown) => unknown }) => Dispatcher
+    /** Takes `proxyTls` for https:// candidates (see httpsProxyOptions); kept
+     *  structurally loose so the existing test seam doubles still satisfy it. */
+    ProxyAgent: new (options: { uri: string; clientFactory?: (origin: URL | string, options?: unknown) => unknown; proxyTls?: { rejectUnauthorized?: boolean } }) => Dispatcher
     request(url: string, options: { dispatcher: Dispatcher; method?: string; headers?: Record<string, string>; body?: string }): Promise<{ statusCode: number; body: { text(): Promise<string> } }>
   }
   /** zen endpoint override for tests. */
@@ -99,7 +101,7 @@ function classifyUpstreamStatus(statusCode: number): ProbeFailure {
  */
 export async function coarseScreen(
   deps: Pick<AdmissionDeps, 'undici' | 'ipEchoUrl' | 'blockedCountries' | 'logger'>,
-  candidate: { address: string; protocol: 'http' | 'socks5' },
+  candidate: { address: string; protocol: ExitProtocol },
   options: { relaxed?: boolean; pinned?: boolean; timeoutMs?: number } = {},
 ): Promise<EchoFacts | { rejected: string; failure?: ProbeFailure }> {
   const ipEcho = deps.ipEchoUrl ?? DEFAULT_IP_ECHO
@@ -112,7 +114,10 @@ export async function coarseScreen(
     // exitProxyUri keeps a scheme the address already carries (issue #44):
     // manual ids are parsed with their scheme, and `http://http://host:port`
     // makes undici's ProxyAgent throw InvalidArgumentError.
-    agent = new deps.undici.ProxyAgent({ uri: exitProxyUri(candidate.address, candidate.protocol) })
+    agent = new deps.undici.ProxyAgent({
+      uri: exitProxyUri(candidate.address, candidate.protocol),
+      ...(candidate.protocol === 'https' ? httpsProxyOptions() : {}),
+    })
   } catch (err) {
     return { rejected: `agent-build: ${err instanceof Error ? err.message : String(err)}`, failure: 'malformed' }
   }
@@ -160,7 +165,7 @@ export async function coarseScreen(
  *  (settings-page refill progress, docs §5.3). */
 export async function coarseScreenBatch(
   deps: Parameters<typeof coarseScreen>[0],
-  candidates: Array<{ address: string; protocol: 'http' | 'socks5' }>,
+  candidates: Array<{ address: string; protocol: ExitProtocol }>,
   options: { fanout?: number; relaxed?: boolean; timeoutMs?: number; onProgress?: (done: number, passed: number) => void } = {},
 ): Promise<Map<string, EchoFacts>> {
   const fanout = Math.max(1, options.fanout ?? 300)
@@ -252,7 +257,7 @@ export interface AdmissionResult {
 
 export async function admitCandidate(
   deps: AdmissionDeps,
-  candidate: { address: string; protocol: 'http' | 'socks5'; source: ExitNode['source'] },
+  candidate: { address: string; protocol: ExitProtocol; source: ExitNode['source'] },
   options: {
     relaxed?: boolean
     pinned?: boolean
@@ -282,7 +287,10 @@ export async function admitCandidate(
 
   let agent: Dispatcher | null = null
   try {
-    agent = new deps.undici.ProxyAgent({ uri: exitProxyUri(candidate.address, candidate.protocol) })
+    agent = new deps.undici.ProxyAgent({
+      uri: exitProxyUri(candidate.address, candidate.protocol),
+      ...(candidate.protocol === 'https' ? httpsProxyOptions() : {}),
+    })
   } catch (err) {
     return { admitted: false, reason: `agent-build: ${err instanceof Error ? err.message : String(err)}` }
   }
@@ -415,7 +423,7 @@ export async function admitCandidate(
  *  unmeasured node is 'C', never the top grade. */
 export async function admitTrusted(
   deps: AdmissionDeps,
-  candidate: { address: string; protocol: 'http' | 'socks5'; source: 'manual' | 'subscription' | 'goproxy' },
+  candidate: { address: string; protocol: ExitProtocol; source: 'manual' | 'subscription' | 'goproxy' },
   options: { pinned?: boolean; previous?: { exitIP: string; exitLocation: string; latencyMs: number; quality?: ExitNode['quality'] } } = {},
 ): Promise<AdmissionResult> {
   const result = await admitCandidate(deps, candidate, { pinned: options.pinned })

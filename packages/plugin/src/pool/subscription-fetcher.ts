@@ -18,7 +18,7 @@
  * `clash-verge/1.6.0` and serves normally for `clash-verge/v2.0`.
  */
 
-import { ExitPool, type ExitNode } from './pool.ts'
+import { ExitPool, type ExitNode, type ExitProtocol } from './pool.ts'
 import { Prober, type ProbeTask } from './prober.ts'
 import { admitTrusted, type AdmissionDeps } from './admission.ts'
 import { applyProbeVerdict } from './probe-verdict.ts'
@@ -186,7 +186,7 @@ export class SubscriptionFetcher {
     const urls = [...this.#urls]
     const userAgent = this.#userAgent
     const pending: ParsedNode[] = []
-    const plaintext: Array<{ address: string; protocol: 'http' | 'socks5' }> = []
+    const plaintext: Array<{ address: string; protocol: ExitProtocol }> = []
     let lastError = ''
     for (const url of urls) {
       try {
@@ -194,7 +194,7 @@ export class SubscriptionFetcher {
         if (this.#stopped) return
         const report = parseSubscription(body)
         for (const node of report.nodes) {
-          if (node.type === 'http' || node.type === 'socks5') {
+          if (node.type === 'http' || node.type === 'https' || node.type === 'socks5') {
             plaintext.push({
               address: `${node.server}:${node.port}`,
               protocol: node.type,
