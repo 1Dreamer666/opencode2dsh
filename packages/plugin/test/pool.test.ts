@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { ExitPool, gradeOf, type ExitNode } from '../src/pool/pool.ts'
+import { parseManualProxy } from '../src/ip-pool.ts'
 
 let clock = 1_000_000
 const now = () => clock
@@ -289,4 +290,17 @@ test('rerouteSession drops the sticky exit (degraded exit loses the session)', (
   p.rerouteSession('ses')
   // the cooling exit is filtered and the sticky pointer is gone
   assert.notEqual(p.pick('ses', 'm'), 'a:1' === first ? first : first)
+})
+
+test('parseManualProxy keeps an https:// proxy on its own scheme', () => {
+  // Same defect as the subscription parser (measured 2026-10-15): the scheme
+  // passed validation and was then discarded, so a user's own https proxy was
+  // dialed as plaintext, hung up on, and struck dead.
+  assert.deepEqual(parseManualProxy('https://1.2.3.4:443'), { id: 'https://1.2.3.4:443', protocol: 'https' })
+  assert.deepEqual(parseManualProxy('http://1.2.3.4:8080'), { id: 'http://1.2.3.4:8080', protocol: 'http' })
+  assert.deepEqual(parseManualProxy('socks5://5.6.7.8:1080'), { id: 'socks5://5.6.7.8:1080', protocol: 'socks5' })
+  // A bare host:port has no scheme to preserve.
+  assert.deepEqual(parseManualProxy('9.9.9.9:3128'), { id: '9.9.9.9:3128', protocol: 'http' })
+  // Unrelated schemes are still refused.
+  assert.equal(parseManualProxy('ftp://1.2.3.4:21'), null)
 })
