@@ -42,6 +42,65 @@ export function setRotateDelegate(next: RotateDelegate | null): void {
   delegate = next
 }
 
+/**
+ * Reports a stream that died AFTER content had already landed.
+ *
+ * This is the reporting half of the same seam, and it exists because of a gap
+ * the dispatcher cannot cover. Its sentinel is disarmed the moment response
+ * headers land (`onResponseStart` -> `disarm()`), so once the body goes silent
+ * mid-stream there is no longer ANY layer that tells the pool the exit died:
+ * the adapter alone sees the watchdog fire, and it used to simply yield a
+ * terminal error. The exit therefore stayed `ok` with whatever latency it had
+ * measured — i.e. near the front of the pick order — so the SAME exit kept
+ * winning the next request and could tear the next stream down too.
+ *
+ * No rotation here (a partially delivered stream is never replayed, docs 3.4):
+ * this only closes the accounting, reusing the pool's existing transport-failure
+ * verdict so the exit leaves rotation and the semantics stay uniform.
+ */
+let failureReporter: ((session: string, model: string) => void) | null = null
+
+/** Install the runtime's stream-failure reporter (startIpPool). */
+export function setStreamFailureReporter(next: ((session: string, model: string) => void) | null): void {
+  failureReporter = next
+}
+
+/** Report a mid-stream death; no-op when no pool is running. */
+export function reportStreamFailure(session: string, model: string): void {
+  failureReporter?.(session, model)
+}
+
+/**
+ * Build the reporting half over the live pool (mirrors createRotateDelegate).
+ *
+ * Reuses the pool's existing transport verdict rather than inventing a second
+ * one: a body that stops mid-stream with no error status IS a transport failure
+ * by docs §4.2, so `recordPassiveTransport` is exactly the right call and the
+ * two-tier semantics stay uniform with the dispatcher's own accounting.
+ *
+ * `avoid` is what actually fixes the reported symptom: the exit keeps its `ok`
+ * mark for a subscription source (disable-only, §3.5) and would otherwise stay
+ * at the front of the pick order, so the avoid window is what stops the next
+ * request from being torn down by the same exit.
+ */
+export function createStreamFailureReporter(
+  pool: ExitPool,
+  onReported?: (exitId: string) => void,
+): (session: string, model: string) => void {
+  return (session, model) => {
+    const failedExit = pool.exitOfSession(session)
+    if (failedExit === null) return
+    pool.recordPassiveTransport(failedExit)
+    pool.avoid(failedExit)
+    pool.rerouteSession(session)
+    onReported?.(failedExit)
+    // `model` is part of the seam for symmetry with the rotate delegate (and
+    // for ban-level bookkeeping if this ever grows); the transport verdict is
+    // exit-level, so it does not need it today.
+    void model
+  }
+}
+
 /** Ask the installed delegate; false when no pool is running. */
 export function shouldRotate(failure: RotateFailure, model: string, session: string, attempt: number, deterministic = false): boolean {
   return delegate?.decide(failure, model, session, attempt, deterministic) ?? false

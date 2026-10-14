@@ -25,7 +25,7 @@ import { PeriodicProber } from './pool/periodic-prober.ts'
 import { RefillScheduler } from './pool/refill.ts'
 import { SubscriptionFetcher } from './pool/subscription-fetcher.ts'
 import { SingBoxSupervisor } from './pool/singbox.ts'
-import { createRotateDelegate, setRotateDelegate } from './pool/rotate.ts'
+import { createRotateDelegate, createStreamFailureReporter, setRotateDelegate, setStreamFailureReporter } from './pool/rotate.ts'
 
 /** Data dir shared with the catalog cache (config.ts convention). */
 function dataDir(): string {
@@ -385,6 +385,17 @@ export async function startIpPool(
   // intermediate error to the host's retry budget.
   setRotateDelegate(createRotateDelegate(pool, { maxAttempts: config.ipPool?.maxRotateAttempts ?? 3 }))
 
+  // Mid-stream failure reporting (docs §3.4/§4.2). The dispatcher's sentinel is
+  // disarmed once response headers land, so a body that goes silent from there
+  // on is invisible to it: without this the exit that just tore the stream down
+  // kept its `ok` mark and its (low) latency, so it stayed at the front of the
+  // pick order and the next request could be torn down by the same exit. The
+  // closure only reads the pool, which never changes identity, so one install
+  // covers every reconfigure.
+  setStreamFailureReporter(createStreamFailureReporter(pool, (exitId) => {
+    logger.warn(`opencode2dsh: exit ${exitId} went silent mid-stream; recorded and excluded from this turn's rotation`)
+  }))
+
   return {
     pool,
     installer,
@@ -431,6 +442,7 @@ export async function startIpPool(
     },
     async dispose() {
       setRotateDelegate(null)
+      setStreamFailureReporter(null)
       subscriptions?.stop()
       refill?.stop()
       periodicRef?.stop()
