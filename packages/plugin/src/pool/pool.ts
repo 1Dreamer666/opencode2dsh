@@ -481,7 +481,10 @@ export class ExitPool {
     if (this.pinnedId !== '' && this.isUsable(this.pinnedId, model)) return this.pinnedId
 
     const last = this.#sessionExit.get(session)
-    if (last !== undefined && this.isUsable(last, model) && !this.#avoiding(last)) return last
+    // Stickiness yields to an in-flight probe as well as to the avoid window:
+    // re-pinning the same exit while it is being probed would hand real
+    // traffic straight back to the exit that is spending the quota.
+    if (last !== undefined && this.isUsable(last, model) && !this.#avoiding(last) && this.#health.get(last)?.inflight !== true) return last
 
     const usable = [...this.#nodes.keys()].filter((id) => this.isUsable(id, model))
     if (usable.length === 0) return null
@@ -498,6 +501,17 @@ export class ExitPool {
       const stateRank = (h: ExitHealth) => (h.state === 'ok' ? 0 : 1)
       const byState = stateRank(a) - stateRank(b)
       if (byState !== 0) return byState
+      // An exit whose health probe is in flight is DEPRIORITIZED, not banned.
+      // The probe and real traffic share one anonymous quota bucket per exit
+      // IP (§4.1), so preferring an exit that is being probed right now is how
+      // an `ok`-looking exit still answers 429. Depriving it of PRIORITY (last,
+      // after every idle candidate) keeps real traffic off it while probes run
+      // without ever emptying the pool: when every usable exit is being probed,
+      // this ranking still returns one, so traffic never falls through to direct
+      // just because a probe sweep happens to be in progress.
+      const busyRank = (h: ExitHealth) => (h.inflight ? 1 : 0)
+      const byInflight = busyRank(a) - busyRank(b)
+      if (byInflight !== 0) return byInflight
       const byLimited = a.consecutiveLimited - b.consecutiveLimited
       if (byLimited !== 0) return byLimited
       const byLatency = latencyRank(node(left).latencyMs) - latencyRank(node(right).latencyMs)

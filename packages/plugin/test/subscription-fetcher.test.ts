@@ -5,6 +5,18 @@ import { ExitPool } from '../src/pool/pool.ts'
 import { Prober } from '../src/pool/prober.ts'
 import { SubscriptionFetcher } from '../src/pool/subscription-fetcher.ts'
 
+/** The seam's request behaviour, callable on its own so tests can wrap it. */
+function seamRequest(url: string, init: { dispatcher: { uri: string } }): Promise<{ statusCode: number; body: { text(): Promise<string> } }> {
+  const address = init.dispatcher.uri.replace(/^https?:\/\//, '')
+  if (url.includes('ip-api')) {
+    return Promise.resolve({
+      statusCode: 200,
+      body: { text: async () => JSON.stringify({ status: 'success', query: `8.8.${address.length}.1`, countryCode: 'US', city: 'c', country: 'c' }) },
+    })
+  }
+  return Promise.resolve({ statusCode: 200, body: { text: async () => '{"ok":true}' } })
+}
+
 /** A fake undici seam: every admission request answers 200 (smoke passes). */
 function seam() {
   return {
@@ -16,16 +28,7 @@ function seam() {
       close() { return Promise.resolve() }
       destroy() { return Promise.resolve() }
     },
-    request: (async (url: string, init: { dispatcher: { uri: string } }) => {
-      const address = init.dispatcher.uri.replace(/^https?:\/\//, '')
-      if (url.includes('ip-api')) {
-        return {
-          statusCode: 200,
-          body: { text: async () => JSON.stringify({ status: 'success', query: `8.8.${address.length}.1`, countryCode: 'US', city: 'c', country: 'c' }) },
-        }
-      }
-      return { statusCode: 200, body: { text: async () => '{"ok":true}' } }
-    }) as never,
+    request: seamRequest as never,
   }
 }
 
@@ -275,5 +278,48 @@ test('a blank UA falls back to the default instead of sending none', async () =>
   fetcher.setUrls(['https://sub.example.com/x'])
   await fetcher.refresh()
   assert.deepEqual(seen, ['clash-verge/v2.0'])
+})
+
+test('a refresh re-smokes only NEW or STALE exits, never the whole table', async () => {
+  // The live regression (2026-10-15): every refresh unconditionally re-smoked
+  // every converted exit, so a table of a few hundred exits re-queued a few
+  // hundred anonymous-lane smokes per round. Measured: `enqueued` climbed past
+  // 2600 with only 400 exits present and a 6-hour refresh interval, because
+  // each round buried the queue faster than the concurrency cap drained it.
+  // Those smokes share the per-exit-IP quota with real traffic — which is how
+  // exits showed `ok` while real requests still answered 429.
+  let smokes = 0
+  const counting = {
+    ProxyAgent: class {
+      constructor(opts: { uri: string }) { this.uri = opts.uri }
+      uri: string
+      close() { return Promise.resolve() }
+      destroy() { return Promise.resolve() }
+    },
+    request: (async (url: string, init: { dispatcher: { uri: string } }) => {
+      // Every proxied request is an admission smoke (echo or upstream).
+      smokes += 1
+      return seamRequest(url, init)
+    }) as never,
+  }
+  const pool = new ExitPool()
+  const prober = new Prober({ pool })
+  const fetcher = new SubscriptionFetcher(
+    { pool, prober, undici: counting as never, fetchImpl: (async () => new Response(SUB_BODY)) as unknown as typeof fetch },
+    { logger: { info: () => {}, warn: () => {} } },
+  )
+  fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
+
+  await fetcher.refresh()
+  const firstRound = smokes
+  assert.ok(firstRound > 0, 'the first refresh probes the new exits')
+  assert.equal(pool.list().length, 2, 'both plaintext nodes are admitted')
+
+  // Refreshing again seconds later must do NO probe work: their verdicts are
+  // fresh, so they are neither new nor stale.
+  smokes = 0
+  await fetcher.refresh()
+  assert.equal(smokes, 0, 'a second refresh burns no anonymous-lane quota on fresh exits')
+  assert.equal(pool.list().length, 2, 'the table is unchanged, not duplicated')
 })
 

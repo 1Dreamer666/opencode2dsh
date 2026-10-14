@@ -212,3 +212,59 @@ test('a dead subscription exit is re-probed by PeriodicProber and returns on suc
   assert.equal(p.list()[0]!.health.state, 'ok')
   assert.equal(p.isUsable('sub:1', 'm'), true)
 })
+
+// -- probe/traffic quota contention (docs §4.1) ---------------------------------
+
+test('an exit being probed is deprioritized, not banned', () => {
+  // Live symptom (2026-10-15): the settings card showed a healthy spread of
+  // `ok` exits while every real request still answered 429. A probe and real
+  // traffic share ONE anonymous quota bucket per exit IP, and `pick` used to
+  // rank purely on health+latency — so the fastest `ok` exit won every pick
+  // even while a probe of it was spending that bucket.
+  const p = pool()
+  p.add(node({ id: 'fast', exitIP: '1.1.1.1', latencyMs: 50 }))
+  p.add(node({ id: 'slow', exitIP: '2.2.2.2', latencyMs: 900 }))
+  p.markOk('fast')
+  p.markOk('slow')
+
+  // Before any probe, the fast exit wins on latency alone.
+  assert.equal(p.pick('s0', 'm'), 'fast')
+
+  p.takeProbeLock('fast')
+  // Still usable — deprioritized, never removed from rotation.
+  assert.equal(p.isUsable('fast', 'm'), true)
+  // But it now loses to an idle exit even though it is 18x faster.
+  const picks: Record<string, number> = {}
+  for (let i = 0; i < 100; i += 1) {
+    const id = p.pick(`probe-deprio-${i}`, 'm')
+    if (id !== null) picks[id] = (picks[id] ?? 0) + 1
+  }
+  assert.equal(picks.slow ?? 0, 100, 'real traffic moves to the idle exit while the fast one is probed')
+  assert.equal(picks.fast ?? 0, 0, 'the probed exit is not handed traffic meanwhile')
+})
+
+test('an all-probed pool still answers: no silent direct-fallback', () => {
+  // The reason this is a DEPRIORITY and not a ban: a full probe sweep covers
+  // up to maxPerRound exits, and refusing every probed exit would empty the
+  // pool mid-sweep and drop the user's traffic to a direct connection.
+  const p = pool()
+  p.add(node({ id: 'a', exitIP: '1.1.1.1', latencyMs: 10 }))
+  p.add(node({ id: 'b', exitIP: '2.2.2.2', latencyMs: 20 }))
+  p.markOk('a')
+  p.markOk('b')
+  p.takeProbeLock('a')
+  p.takeProbeLock('b')
+  assert.notEqual(p.pick('s', 'm'), null, 'a usable exit is still returned when all are being probed')
+})
+
+test('session stickiness yields to an in-flight probe', () => {
+  const p = pool()
+  p.add(node({ id: 'fast', exitIP: '1.1.1.1', latencyMs: 50 }))
+  p.add(node({ id: 'slow', exitIP: '2.2.2.2', latencyMs: 900 }))
+  p.markOk('fast')
+  p.markOk('slow')
+  assert.equal(p.pick('sess', 'm'), 'fast')
+
+  p.takeProbeLock('fast')
+  assert.notEqual(p.pick('sess', 'm'), 'fast', 'stickiness does not re-pin a session onto the probed exit')
+})
