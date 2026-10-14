@@ -42,11 +42,6 @@ export function setRotateDelegate(next: RotateDelegate | null): void {
   delegate = next
 }
 
-/** True when a runtime delegate is installed (adapter fast-path). */
-export function hasRotateDelegate(): boolean {
-  return delegate !== null
-}
-
 /** Ask the installed delegate; false when no pool is running. */
 export function shouldRotate(failure: RotateFailure, model: string, session: string, attempt: number, deterministic = false): boolean {
   return delegate?.decide(failure, model, session, attempt, deterministic) ?? false

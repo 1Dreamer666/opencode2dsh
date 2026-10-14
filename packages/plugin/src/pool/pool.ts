@@ -370,17 +370,6 @@ export class ExitPool {
     return false
   }
 
-  /** Death from a mid-flight stream (no retry path): same strike accounting. */
-  markStreamFailure(id: string, kind: '429' | 'model', model?: string): void {
-    if (kind === '429') {
-      this.markLimited(id)
-      this.#countPassive(id, 'limited')
-    } else if (model !== undefined) {
-      this.markModelSignal(id, model)
-      this.#countPassive(id, 'refused')
-    }
-  }
-
   /**
    * Passive signal from a REAL request outcome (docs/ip-pool.md §4.2 rule
    * table, §4.3 被动 row): one response header read at the routing layer,
@@ -519,11 +508,6 @@ export class ExitPool {
     if (chosen === undefined) return null
     this.#sessionExit.set(session, chosen)
     return chosen
-  }
-
-  /** Drop the session's sticky exit (cooldown/dead/ban broke it). */
-  breakStickySession(session: string): void {
-    this.#sessionExit.delete(session)
   }
 
   // -- four-state machine (3.5) -------------------------------------------------

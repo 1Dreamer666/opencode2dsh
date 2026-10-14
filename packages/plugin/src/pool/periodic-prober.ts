@@ -82,10 +82,6 @@ export class PeriodicProber {
     }
   }
 
-  setMaxPerRound(value: number): void {
-    this.#maxPerRound = Math.max(1, value)
-  }
-
   start(): void {
     if (this.#timer !== null || this.#stopped) return
     this.#timer = setInterval(() => void this.tick(), this.#intervalMs)

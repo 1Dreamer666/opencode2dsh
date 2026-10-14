@@ -290,12 +290,3 @@ test('rerouteSession drops the sticky exit (degraded exit loses the session)', (
   // the cooling exit is filtered and the sticky pointer is gone
   assert.notEqual(p.pick('ses', 'm'), 'a:1' === first ? first : first)
 })
-
-test('markStreamFailure counts passive buckets (mid-flight §3.4)', () => {
-  const p = pool()
-  p.add(node({ id: 'e:1', source: 'manual', exitIP: '9.9.9.9' }))
-  p.markStreamFailure('e:1', '429')
-  p.markStreamFailure('e:1', 'model', 'muse')
-  assert.equal(p.passiveStats('e:1').limited, 1)
-  assert.equal(p.passiveStats('e:1').refused, 1)
-})
