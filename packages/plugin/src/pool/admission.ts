@@ -152,9 +152,16 @@ export async function coarseScreen(
       latencyMs,
     }
   } catch (err) {
-    // Dial failure, SOCKS5 handshake failure, timeout, socket reset: the link
-    // itself is gone. This is the class that legitimately means "dead".
-    return { rejected: err instanceof Error ? err.message : String(err), failure: 'transport' }
+    // Dial failure, SOCKS5 handshake failure, timeout, socket reset: the echo
+    // endpoint was NOT reachable THROUGH this exit. This is deliberately NOT
+    // `transport`: an echo-side failure says nothing about whether the exit
+    // can reach the real target (opencode.ai) — a proxy that blocks port 80
+    // or times out to ip-api.com can still carry the HTTPS tunnel fine.
+    // Callers decide what the class means: `admitCandidate` keeps a trusted
+    // candidate and re-checks the tunnel, while the free-candidate refill
+    // (coarseScreenBatch) treats it as a rejection because a node that cannot
+    // reach the echo cannot have its geo/exit-IP recorded.
+    return { rejected: err instanceof Error ? err.message : String(err), failure: 'echo-unavailable' }
   } finally {
     void agent.close().catch(() => {})
   }
@@ -306,13 +313,34 @@ export async function admitCandidate(
     // Steps 1+2 run inline only when the caller has not pre-screened the
     // candidate (coarseScreen/batch output = echoFacts; the refill loop
     // always pre-screens free candidates at high fan-out).
-    let facts: EchoFacts
+    let facts: EchoFacts | undefined
+    let echoUnavailable = ''
     if (options.echoFacts) {
       facts = options.echoFacts
     } else {
       const verdict = await coarseScreen(deps, candidate, options)
-      if ('rejected' in verdict) return { admitted: false, reason: verdict.rejected, failure: verdict.failure }
-      facts = verdict
+      if ('rejected' in verdict) {
+        // Echo endpoint unreachable THROUGH this exit (connect timeout, SOCKS5
+        // handshake failure, reset). This says the exit cannot reach
+        // ip-api.com — NOT that it cannot reach the real target. A trusted or
+        // pinned candidate keeps its pool slot and is re-checked against the
+        // tunnel below (the geo/exit-IP we lose is re-derived on a later
+        // successful probe). Free candidates should NOT take this path: the
+        // refill pre-screens them through coarseScreenBatch, which rejects
+        // here; the inline free path (probeAll) deliberately continues so a
+        // working free exit is not evicted by a blocked echo endpoint.
+        if (verdict.failure === 'echo-unavailable') {
+          echoUnavailable = verdict.rejected
+          facts = undefined
+        } else {
+          // Non-network echo rejections (geo-blocked, slow, malformed, quota,
+          // refused, server-error) are policy verdicts on a node that DID
+          // answer — the candidate is refused outright.
+          return { admitted: false, reason: verdict.rejected, failure: verdict.failure }
+        }
+      } else {
+        facts = verdict
+      }
     }
 
     // Step 3: HTTPS tunnel to the real upstream (models list, Bearer public).
@@ -368,34 +396,44 @@ export async function admitCandidate(
         return {
           admitted: true,
           limited: true,
-          reason: `zen smoke HTTP 429`,
+          reason: `zen smoke HTTP 429${echoUnavailable ? ` (echo unavailable: ${echoUnavailable})` : ''}`,
           node: {
             id: candidate.address,
             protocol: candidate.protocol,
             source: candidate.source,
             pinned: options.pinned ?? false,
-            exitIP: facts.exitIP,
-            exitLocation: facts.exitLocation,
-            latencyMs: facts.latencyMs,
-            quality: gradeOf(facts.latencyMs),
+            exitIP: facts?.exitIP ?? '',
+            exitLocation: facts?.exitLocation ?? '',
+            latencyMs: facts?.latencyMs ?? 0,
+            // Unmeasured latency is the worst grade, not the best (see
+            // admitTrusted): gradeOf(0) would hand out 'S'.
+            quality: facts && facts.latencyMs > 0 ? gradeOf(facts.latencyMs) : 'C',
             addedAt: Date.now(),
           },
         }
       }
-      return { admitted: false, reason: `zen smoke HTTP ${smoke.statusCode}`, failure: classifyUpstreamStatus(smoke.statusCode), facts }
+      return { admitted: false, reason: `zen smoke HTTP ${smoke.statusCode}${echoUnavailable ? ` (echo unavailable: ${echoUnavailable})` : ''}`, failure: classifyUpstreamStatus(smoke.statusCode), facts }
     }
 
     return {
       admitted: true,
+      // Tunnel + smoke both cleared; the echo never answered (blocked port,
+      // ip-api timeout, proxy restrict) but the exit demonstrably serves the
+      // real target. Admitted without facts: the caller keeps the node in the
+      // pool, and a later probe re-derives geo/exitIP/latency. Health stays
+      // 'ok' (this is a VERIFIED tunnel, unlike the degraded fallback).
+      reason: echoUnavailable ? `admitted with echo unavailable: ${echoUnavailable}` : undefined,
       node: {
         id: candidate.address,
         protocol: candidate.protocol,
         source: candidate.source,
         pinned: options.pinned ?? false,
-        exitIP: facts.exitIP,
-        exitLocation: facts.exitLocation,
-        latencyMs: facts.latencyMs,
-        quality: gradeOf(facts.latencyMs),
+        exitIP: facts?.exitIP ?? '',
+        exitLocation: facts?.exitLocation ?? '',
+        latencyMs: facts?.latencyMs ?? 0,
+        // Unmeasured latency is the worst grade, not the best (see
+        // admitTrusted): gradeOf(0) would hand out 'S'.
+        quality: facts && facts.latencyMs > 0 ? gradeOf(facts.latencyMs) : 'C',
         addedAt: Date.now(),
       },
     }
@@ -427,7 +465,26 @@ export async function admitTrusted(
   options: { pinned?: boolean; previous?: { exitIP: string; exitLocation: string; latencyMs: number; quality?: ExitNode['quality'] } } = {},
 ): Promise<AdmissionResult> {
   const result = await admitCandidate(deps, candidate, { pinned: options.pinned })
-  if (result.admitted) return result
+  if (result.admitted) {
+    // Admitted with empty facts because the echo never answered (a blocked
+    // echo endpoint, not a dead link): merge the pool's previously measured
+    // facts so a known exitIP/latency is not wiped by an empty re-probe. The
+    // tunnel + smoke cleared, so health may be 'ok'; the node just loses
+    // nothing it already had.
+    if (result.node && !result.node.exitIP && options.previous?.exitIP) {
+      return {
+        ...result,
+        node: {
+          ...result.node,
+          exitIP: options.previous.exitIP,
+          exitLocation: options.previous.exitLocation,
+          latencyMs: options.previous.latencyMs,
+          quality: options.previous.quality ?? result.node.quality,
+        },
+      }
+    }
+    return result
+  }
   // Prefer what THIS attempt measured (steps 1+2 may have succeeded before a
   // later step refused); fall back to the pool's previously stored facts.
   const facts = result.facts ?? options.previous

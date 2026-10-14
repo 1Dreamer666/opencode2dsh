@@ -252,6 +252,34 @@ test('admission: the trusted fallback prefers previously stored facts over place
   assert.equal(result.node?.quality, 'S')
 })
 
+test('admission: an echo-side transport failure continues to the tunnel instead of striking dead', async () => {
+  // Live symptom (2026-10-14): subscription exits all died with
+  // `Connect Timeout Error (attempted address: ip-api.com:80, timeout: 5000ms)`
+  // and `SOCKS5 connection failed` — the echo endpoint was unreachable THROUGH
+  // them, but that says nothing about whether they reach the real target
+  // (opencode.ai). A healthy exit must not be struck dead because ip-api.com
+  // is blocked/slow for it. The tunnel step decides.
+  //
+  // 1) Echo transport fails but the tunnel + smoke clear: the exit is ADMITTED
+  //    with unknown facts (no geo/exitIP/latency), NOT dead.
+  const transport = fakeTransport({
+    [ECHO_URL]: new Error('Connect Timeout Error (attempted address: ip-api.com:80, timeout: 5000ms)'),
+    [MODELS_URL]: { status: 200, body: '{"data":[]}' },
+    [CHAT_URL]: { status: 200, body: '{"id":"x"}' },
+  })
+  const result = await admitCandidate(deps(transport), { address: 'sub:1', protocol: 'http', source: 'subscription' })
+  assert.equal(result.admitted, true, 'tunnel+smoke cleared: the exit is usable even without echo facts')
+  assert.equal(result.node?.exitIP, '', 'no echo facts to record')
+  assert.equal(result.node?.quality, 'C', 'unmeasured latency is the worst grade, never the best')
+  assert.equal(result.failure, undefined, 'an admitted exit carries no failure class')
+
+  // 2) Echo AND tunnel both fail at the transport level: the link is dead.
+  const deadTransport = fakeTransport({ '*': new Error('SOCKS5 connection timeout') })
+  const dead = await admitCandidate(deps(deadTransport), { address: 'sub:1', protocol: 'http', source: 'subscription' })
+  assert.equal(dead.admitted, false)
+  assert.equal(dead.failure, 'transport', 'echo AND tunnel unreachable = genuinely dead')
+})
+
 test('admission: scheme-carrying manual addresses build a valid agent URI (issue #44)', async () => {
   // manual entries keep the scheme the UI asks for (http://host:port), and
   // prefixing again yields http://http://host:port — InvalidArgumentError in

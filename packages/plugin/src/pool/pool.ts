@@ -46,6 +46,16 @@ export type ProbeFailure =
   | 'geo-blocked'
   | 'slow'
   | 'malformed'
+  /**
+   * The echo step could not reach its endpoint at all (connect timeout, SOCKS5
+   * handshake failure, socket reset to the IP echo). Distinct from
+   * `transport`: an echo-side network failure says nothing about whether the
+   * exit can reach the REAL target (`opencode.ai`), so a trusted-path probe
+   * continues to the tunnel step rather than striking the exit dead. Free
+   * candidates still die here (they are cheap to refill, and a node that
+   * cannot reach the echo also cannot have its geo/exit-IP recorded).
+   */
+  | 'echo-unavailable'
 
 export interface ExitNode {
   /** host:port, unique inside the pool (the address we dial). */

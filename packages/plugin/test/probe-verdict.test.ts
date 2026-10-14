@@ -67,7 +67,7 @@ test('verdict: a transport failure marks the exit dead instead of leaving it unk
 })
 
 test('verdict: only the transport class strikes dead — every answering class does not', () => {
-  const answering = ['refused', 'server-error', 'geo-blocked', 'slow', 'malformed'] as const
+  const answering = ['refused', 'server-error', 'geo-blocked', 'slow', 'malformed', 'echo-unavailable'] as const
   for (const failure of answering) {
     const p = pool()
     p.add(node({ id: 'sub:1' }))

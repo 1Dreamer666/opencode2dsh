@@ -123,6 +123,7 @@ function applyFailure(
     case 'geo-blocked':
     case 'slow':
     case 'malformed':
+    case 'echo-unavailable':
       // The exit ANSWERED. Upstream 5xx is the model's fault behind a healthy
       // exit (pool.recordPassive already made this call on 2026-09-09), a
       // geo-block is a step-2 policy verdict, `slow` is the maxResponseMs
@@ -130,6 +131,12 @@ function applyFailure(
       // mean the link died, so health is deliberately left alone — but the
       // failure is still recorded, so the card can say "probed, refused"
       // instead of the indistinguishable 未探活.
+      // `echo-unavailable` is the echo-side transport failure: the exit could
+      // not reach the IP echo, which says nothing about the real target
+      // (opencode.ai). A trusted/pinned exit is kept alive and re-checked via
+      // the tunnel step (admitCandidate continues past a failed echo); a free
+      // candidate dies at the refill's coarse screen instead (where it is
+      // cheaply refilled and no geo/exit-IP could be recorded anyway).
       pool.markProbeFailure(id, failure, reason)
       return 'unchanged'
 
