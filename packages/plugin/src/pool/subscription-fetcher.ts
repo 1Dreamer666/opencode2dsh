@@ -103,6 +103,11 @@ export class SubscriptionFetcher {
   #timeoutMs: number
   #userAgent: string
   #logger?: SubscriptionOptions['logger']
+  /** Notified after every real admission — the runtime assembly uses it to
+   *  engage routing the moment a subscription pool stops being empty (the
+   *  initial install is skipped exactly then, and a subscription-only pool
+   *  has no refill loop to fire the free-source hook). */
+  #admittedCallbacks: Array<() => void> = []
 
   constructor(deps: SubscriptionDeps, options: SubscriptionOptions = {}) {
     this.#deps = deps
@@ -114,6 +119,21 @@ export class SubscriptionFetcher {
 
   get state(): SubscriptionState {
     return { ...this.#state, running: this.#refreshing !== null, pendingConversion: [...this.#state.pendingConversion] }
+  }
+
+  /** Register a callback fired after every node this round really admits. */
+  onAdmitted(callback: () => void): void {
+    this.#admittedCallbacks.push(callback)
+  }
+
+  #notifyAdmitted(): void {
+    for (const callback of this.#admittedCallbacks) {
+      try {
+        callback()
+      } catch {
+        /* a watcher's failure must never kill the round */
+      }
+    }
   }
 
   /** Configured URL count (status bridge; the URLs themselves never ride out). */
@@ -267,6 +287,7 @@ export class SubscriptionFetcher {
                 })
                 if (!known.has(exit.address) && isNew) {
                   this.#state.convertedAdmitted += 1
+                  this.#notifyAdmitted()
                 }
                 const served = exit.node
                 // Drop the served node by identity, not by value: this ran
@@ -316,7 +337,10 @@ export class SubscriptionFetcher {
               source: 'subscription',
               model: this.#deps.smokeModel ?? 'big-pickle',
             })
-            if (isNew) this.#state.plaintextAdmitted += 1
+            if (isNew) {
+              this.#state.plaintextAdmitted += 1
+              this.#notifyAdmitted()
+            }
           }
         },
       }))

@@ -208,6 +208,20 @@ export async function startIpPool(
         { ...admissionDeps, prober, supervisor: ensureSupervisor() },
         { logger },
       )
+      // Engage routing the moment a subscription round lands exits. The
+      // free-source hook (refill.onAdmitted below) never fires for a
+      // subscription-only pool, so without this the dispatcher stays
+      // uninstalled and real traffic never routes through the pool — the
+      // exits sit in the table collecting probes but no 真实流量 (live
+      // state 2026-10-16: pool total 38, all subscription, installer off).
+      subscriptions.onAdmitted(() => {
+        if (!installer.enabled && config.ipPool?.enabled !== false && pool.snapshot().total > 0) {
+          installer.install()
+          if (installer.enabled) {
+            logger.info('opencode2dsh: first subscription exits admitted — exit routing engaged')
+          }
+        }
+      })
     }
     subscriptions.setUrls(urls)
     return subscriptions

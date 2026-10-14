@@ -88,6 +88,40 @@ test('subscription refresh: plaintext nodes smoke into the pool, encrypted park 
   assert.equal(state.lastError, '')
 })
 
+test('subscription refresh: onAdmitted fires when new nodes enter the pool', async () => {
+  // Live regression (2026-10-16): a subscription-only pool (no free exits)
+  // never engaged routing, because the free-source refill hook is the ONLY
+  // path that installed the dispatcher. Real traffic stayed direct and no
+  // subscription exit ever collected 真实流量 data. The fetcher needs its own
+  // onAdmitted hook so the runtime can install routing when the first
+  // subscription exit lands.
+  const { fetcher } = makeFetcher((async () => new Response(SUB_BODY)) as unknown as typeof fetch)
+  const fired: number[] = []
+  fetcher.onAdmitted(() => { fired.push(1) })
+  fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
+  await fetcher.refresh()
+  // Two NEW plaintext nodes were admitted this round; the callback fires per
+  // new admission (once each), not once per round.
+  assert.equal(fired.length, 2, 'the onAdmitted hook fires once per new node admitted')
+})
+
+test('subscription refresh: onAdmitted does NOT fire for re-smoked existing nodes', async () => {
+  // A refresh re-smokes STALE exits (RESMOKE_AFTER_MS) but they are not NEW
+  // admissions — the routing hook must not re-fire (install() is idempotent
+  // but noisy) for a node already in the table.
+  const { fetcher } = makeFetcher((async () => new Response(SUB_BODY)) as unknown as typeof fetch)
+  const fired: number[] = []
+  fetcher.onAdmitted(() => { fired.push(1) })
+  fetcher.setUrls(['https://sub.example.com/token-abcdef-123456'])
+  await fetcher.refresh()
+  assert.equal(fired.length, 2, 'first refresh admits the two plaintext nodes')
+
+  // Second refresh: same nodes, none stale (fresh smoke), nothing new to admit.
+  const before = fired.length
+  await fetcher.refresh()
+  assert.equal(fired.length, before, 'a re-refresh of fresh nodes does not re-fire onAdmitted')
+})
+
 test('subscription refresh: a plaintext node whose link is gone is marked dead, not left unprobed', async () => {
   // The live regression (2026-10-14): 703 of 726 subscription exits sat at
   // 'unknown' with zero facts after a full probe sweep. They had all been
