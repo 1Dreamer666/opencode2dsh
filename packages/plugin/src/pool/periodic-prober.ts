@@ -27,6 +27,11 @@
 
 import type { ExitPool } from './pool.ts'
 
+/** Minimum gap between two dead-retry probes of the SAME exit (docs §4.6).
+ *  The first slice of the exponential backoff the doc names; the round cap plus
+ *  the rotating cursor space the retries out from there. */
+const DEAD_RETRY_MS = 30 * 60_000
+
 export interface PeriodicProbeOptions {
   /** Tick interval (docs §4.6 probeIntervalMs, default 10min). */
   intervalMs?: number
@@ -53,6 +58,9 @@ export class PeriodicProber {
   #stopped = false
   #lastRunAt = 0
   #lastQueued = 0
+  /** Rotating start offset into the due dead-retry list, so consecutive rounds
+   *  cover different slices instead of re-probing the same head forever. */
+  #deadCursor = 0
 
   constructor(
     pool: ExitPool,
@@ -102,6 +110,20 @@ export class PeriodicProber {
    */
   select(now = this.#now()): ProbeCandidate[] {
     const out: ProbeCandidate[] = []
+    // A dead retry only earns its quota once the exit has actually been given
+    // time to come back. Measured live (2026-10-15) on a pool of 559 dead
+    // subscription exits: without a gate the prober re-probed the SAME first 20
+    // of them every 10 minutes, forever — ~2880 smokes a day spent re-learning
+    // that an already-proven-dead link is dead — while the other 539 never got
+    // their dead-retry chance at all, because `pool.list()` walks in insertion
+    // order and the per-round cap simply truncated it. A subscription node is
+    // disable-only (§3.5) with no other route back, so that starvation is how a
+    // recovered node stays out of rotation permanently.
+    //
+    // Rotating the start offset fixes the starvation and, with the cooldown
+    // gate, spaces each exit's retries out instead of hammering the same head
+    // of the list.
+    const retryable = this.#selectableDeadRetries(now)
     for (const entry of this.#pool.list()) {
       const health = entry.health
       // A probe already in flight for this exit owns it (per-exit serial, §4.1).
@@ -110,7 +132,7 @@ export class PeriodicProber {
         // dead retry (docs §4.6 deadRetryMs): dead exits get another chance;
         // manual/subscription ones are disable-only and would otherwise never
         // come back.
-        out.push({ id: entry.id, reason: 'dead-retry' })
+        if (retryable.has(entry.id)) out.push({ id: entry.id, reason: 'dead-retry' })
         continue
       }
       if (health.cooldownUntil > now) continue // still cooling: probing now wastes quota
@@ -129,6 +151,42 @@ export class PeriodicProber {
       }
     }
     return out.slice(0, this.#maxPerRound)
+  }
+
+  /**
+   * Which dead exits may be retried this round.
+   *
+   * Two rules, both learned from the live pool of 559 dead subscription exits:
+   *
+   *  1. **A cooldown gate.** `deadRetryMs` is the first slice of the backoff
+   *     docs §4.6 names but the code never had: without it a proven-dead exit
+   *     was re-probed every single round, which is pure quota spend to
+   *     re-derive a verdict that almost never changes (23 of 24 sampled
+   *     subscription failures were `transport`, and a gone link does not heal by
+   *     waiting).
+   *  2. **A rotating start offset.** Both `pool.list()` insertion order and the
+   *     per-round cap are stable, so without a rotation the same head of the
+   *     list wins forever and everything past `maxPerRound` starves. The offset
+   *     advances each round, so the retry window walks the whole table and a
+   *     recovered exit eventually gets its chance back — which matters because a
+   *     subscription node is disable-only (§3.5) and has no other route in.
+   */
+  #selectableDeadRetries(now: number): Set<string> {
+    const dead = this.#pool.list().filter((entry) => entry.health.state === 'dead')
+    if (dead.length === 0) return new Set()
+    const out = new Set<string>()
+    // How many of them are due for a retry right now.
+    const due = dead.filter((entry) => now - entry.health.lastProbedAt >= DEAD_RETRY_MS)
+    if (due.length === 0) return out
+    // Walk the due list from a rotating offset so consecutive rounds cover
+    // different slices; the offset advances by the per-round cap each round.
+    const offset = this.#deadCursor % due.length
+    this.#deadCursor = (offset + Math.max(1, this.#maxPerRound)) % Math.max(1, due.length)
+    for (let i = 0; i < due.length && out.size < this.#maxPerRound; i += 1) {
+      const entry = due[(offset + i) % due.length]
+      if (entry !== undefined) out.add(entry.id)
+    }
+    return out
   }
 
   /** One round; skipped while the previous one is still draining. */

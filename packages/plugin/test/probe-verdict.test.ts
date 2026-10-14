@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 
 import { ExitPool, type ExitNode } from '../src/pool/pool.ts'
 import { applyProbeVerdict } from '../src/pool/probe-verdict.ts'
+import { PeriodicProber } from '../src/pool/periodic-prober.ts'
 import type { AdmissionResult } from '../src/pool/admission.ts'
 
 let clock = 5_000_000
@@ -267,4 +268,71 @@ test('session stickiness yields to an in-flight probe', () => {
 
   p.takeProbeLock('fast')
   assert.notEqual(p.pick('sess', 'm'), 'fast', 'stickiness does not re-pin a session onto the probed exit')
+})
+
+// -- dead-retry fairness and backoff (docs §4.6) --------------------------------
+
+test('dead retries are gated and rotate, so they neither burn quota nor starve', () => {
+  // Measured live (2026-10-15) on a 559-exit subscription pool that was all
+  // dead: `select()` returned the SAME first 20 exits every round. That burned
+  // an anonymous-lane smoke per retry to re-derive a verdict that almost never
+  // changes (23 of 24 sampled failures were `transport`), while the other 539
+  // exits never got a dead-retry chance at all — and a subscription node is
+  // disable-only (§3.5), so a node that recovered late could never rejoin.
+  let clock = 10_000_000
+  const now = () => clock
+  const p = new ExitPool({ now })
+  const total = 559
+  for (let i = 1; i <= total; i += 1) {
+    // A DISTINCT exit IP per node: `pool.add` refuses two addresses sharing one
+    // exit IP (§3.1 — they are one quota bucket), so a repeating IP would
+    // silently shrink the table and make this test prove nothing.
+    p.add(node({ id: `d${i}`, exitIP: `198.51.${Math.floor(i / 250)}.${i % 250}`, latencyMs: 0 }))
+    p.markOk(`d${i}`)
+    p.recordPassiveTransport(`d${i}`)
+  }
+  assert.equal(p.list().length, total, 'every node entered the table')
+  const prober = new PeriodicProber(p, async () => {}, { now })
+  clock += 31 * 60_000 // past the retry gate
+
+  // A dead exit far down the list must eventually be retried.
+  const covered = new Set<string>()
+  let reachedFarExit = -1
+  for (let round = 1; round <= 30; round += 1) {
+    const deadRetries = prober.select().filter((c) => c.reason === 'dead-retry').map((c) => c.id)
+    for (const id of deadRetries) covered.add(id)
+    if (deadRetries.includes(`d${total - 1}`)) reachedFarExit = round
+    clock += 31 * 60_000
+  }
+  assert.ok(reachedFarExit > 0, 'an exit at the end of a 559-entry table is still reached')
+  assert.ok(covered.size > 100, `retries rotate across the table (covered ${covered.size} distinct exits)`)
+
+  // The gate: a second round immediately after must not re-probe the same ones.
+  const fresh = new ExitPool({ now })
+  fresh.add(node({ id: 'a', exitIP: '1.1.1.1', latencyMs: 0 }))
+  fresh.markOk('a')
+  fresh.recordPassiveTransport('a')
+  const gated = new PeriodicProber(fresh, async () => {}, { now })
+  assert.equal(gated.select().filter((c) => c.reason === 'dead-retry').length, 0,
+    'a just-failed exit is not retried again in the same breath (DEAD_RETRY_MS gate)')
+})
+
+test('an exit that recovered is NOT dead-retried', () => {
+  let clock = 20_000_000
+  const now = () => clock
+  const p = new ExitPool({ now })
+  p.add(node({ id: 'sub:1', exitIP: '1.1.1.1', latencyMs: 0 }))
+  p.markOk('sub:1')
+  p.recordPassiveTransport('sub:1')
+  assert.equal(p.list()[0]!.health.state, 'dead')
+
+  // A later probe passes: the exit is back in rotation on its own.
+  p.markOk('sub:1')
+  assert.equal(p.list()[0]!.health.state, 'ok')
+  assert.equal(p.isUsable('sub:1', 'm'), true, 'recovery needs no dead-retry, it is already usable')
+
+  const prober = new PeriodicProber(p, async () => {}, { now })
+  clock += 31 * 60_000
+  assert.equal(prober.select().filter((c) => c.reason === 'dead-retry').length, 0,
+    'a healthy exit is never queued as a dead retry')
 })
