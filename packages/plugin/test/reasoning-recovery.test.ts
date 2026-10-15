@@ -188,15 +188,19 @@ test('cancellation after the first request prevents recovery and preserves its u
 
 test('retry failures keep their actual finish reason and account for the failed first attempt', async () => {
   for (const stopReason of ['error', 'aborted'] as const) {
+    const refused: PiEvent[] = [{ type: 'error', error: message({ stopReason, content: [], errorMessage: '403 invalid API key',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    }) }]
     const { adapter, calls } = scripted([
       [...thinking(), { type: 'done', message: message() }],
-      [{ type: 'error', error: message({ stopReason, content: [], errorMessage: '403 invalid API key',
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
-      }) }],
+      refused,
+      // A 403 before content is refused, so the adapter replays it once on the
+      // sibling host; that attempt fails the same way and the error surfaces.
+      refused,
     ])
     const controller = new AbortController()
     const chunks = await collect(adapter, { ...options, signal: controller.signal })
-    assert.equal(calls.length, 2)
+    assert.equal(calls.length, 3)
     assert.equal(calls[1]!.options.signal, controller.signal)
     const finish = chunks.at(-1)
     assert.equal(finish?.type, 'finish')
