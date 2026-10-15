@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The free-lane request follows the gate measured in #74, #75 and #78: `ZEN_BASE_URL` is `/inference`, `x-opencode-request` is no longer sent (any value is refused), `x-opencode-project` carries `global` rather than a `prj_` id, `x-opencode-session-id` repeats the session id, and the injected `bash`/`read` gate tools carry real schemas — an empty-schema shell of a gate name is replaced instead of counted as satisfied. The legacy sidecar's `upstream.zen` follows.
+
 ## 0.3.12 (2026-10-14)
 
 ### Fixed
