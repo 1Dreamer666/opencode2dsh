@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
 import { opencodeUserAgent } from '../src/adapter/ids.ts'
-import { decodeModelsDev, decide, fetchZenModels, FREE_LANE_BLOCKLIST, FREE_LANE_PROBE_SET, isFreeModel, ModelCatalog, staticFreeModels } from '../src/adapter/catalog.ts'
+import { decodeModelsDev, decide, fetchZenModels, FREE_LANE_BLOCKLIST, FREE_LANE_PROBE_SET, isFreeModel, ModelCatalog, staticFreeModels, ZEN_BASE_URL } from '../src/adapter/catalog.ts'
 
 function price(input?: number, output?: number, deprecated = false, reasoning = false) {
   return { input, output, deprecated, reasoning }
@@ -637,7 +637,9 @@ test('adaptive probe: a pass exposes the muse ids, a refusal keeps them hidden',
   // the verdict — muse on Taiwan egress answers 200, so it must appear.
   const catalog = new ModelCatalog({
     fetchImpl: fakeFetch({
-      'https://opencode.ai/zen/v1/models': { data: [...FREE_LANE_PROBE_SET].map((id) => ({ id })) },
+      // Derived from the adapter's own base URL: #80 moves it /zen -> /inference,
+      // and a hardcoded literal here would silently stop matching the fetch.
+      [`${ZEN_BASE_URL.replace(/\/+$/, '')}/v1/models`]: { data: [...FREE_LANE_PROBE_SET].map((id) => ({ id })) },
     }),
     probeDisabled: true, // no background timer; drive the round manually
     probeImpl: async (model, api) => {
