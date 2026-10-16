@@ -399,7 +399,9 @@ export class ModelCatalog {
         // observers must never break the refresh loop
       }
     }
-  }  async refreshZen(): Promise<void> {
+  }
+
+  async refreshZen(): Promise<void> {
     try {
       const ids = await fetchZenModels(this.#zenBaseUrl, this.#fetch, opencodeUserAgent())
       this.#zen = new Set(ids)
