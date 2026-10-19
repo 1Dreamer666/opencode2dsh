@@ -4,6 +4,7 @@
 
 ### Added
 
+- Optional local-OpenCode delegation for the credential gate (#92, ref #76; **off by default**). When the anonymous lane is persistently refused (direct attempt AND the sibling-host replay both `403 FreeTierError`) and the user opts in via `delegation.enabled`, the turn runs through a real local `opencode serve` child process instead of surfacing the error: only the `opencode` entry of the user's existing auth.json is seeded (0600, isolated XDG root, value never logged), the binary is version-floored at 1.18.0 (managed -> global -> npm download, sha512-verified), memory is capped (`GOMEMLIMIT`/`GOGC` + working-set trim), and every native tool call is mediated ask-then-reject so nothing executes on the user's machine. Success is judged by `info.error` presence, never by "has a text part" (the runtime reports gate failures with HTTP 200). Enabling makes the plugin a credential custodian — read `docs/delegation.md` before turning it on; disabled, the anonymous path is unchanged.
 - Blocklisted free models are re-verified from this host's own exit by an adaptive probe (#84). The probe set is the issue #56 blocklist minus the never-serve protocol id (`jev-1.13-free`): `exo-free`, `ling-3.0-flash-fin-free`, `muse-spark-1.2/1.3-contributor-free`. A 1-token request on the model's real lane (Responses for muse, chat for the rest) decides per boot whether the id is exposed again, with a 30-minute retry; refused or still-pending ids stay hidden, so #56's conservative default holds until this egress proves otherwise (#82).
 
 ### Fixed
