@@ -3,6 +3,7 @@ import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions
 import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses'
 
 import { ModelCatalog, ZEN_BASE_URL } from './catalog.ts'
+import type { DelegationDelegate } from './delegate.ts'
 import { toStreamChunks, type HarnessChunk, type PiDoneMessage, type PiEvent } from './events.ts'
 import { deriveRequestIDs, disguiseHeaders } from './ids.ts'
 import { ensureFreeLaneShape, ensureResponsesFreeLaneShape, GATE_TOOL_ALIASES, toPiContext, type HarnessGenerateOptions, type PiContext } from './messages.ts'
@@ -302,6 +303,17 @@ function siblingZenBaseUrl(baseUrl: string): string | null {
 }
 
 /**
+ * True when an anonymous-lane failure is the FreeTierError credential gate
+ * (issue #76) — the only refusal class delegation can rescue. Mirrors events.ts
+ * classifyError's FREE_TIER_RESTRICTED spelling. Deliberately NOT RegionError:
+ * a region block is a different refusal that re-running through a local runtime
+ * with the same identity would not lift.
+ */
+export function isFreeTierRefusal(errorMessage: string): boolean {
+  return /\bFreeTierError\b|free tier can only be used from within opencode/i.test(errorMessage)
+}
+
+/**
  * The stream surface the adapter needs from a transport. Both a raw pi-ai
  * provider and its Models wrapper satisfy this structurally; the adapter's
  * unit tests inject a scripted object through the same seam (providerOverride).
@@ -346,6 +358,12 @@ export class ZenAdapter {
   readonly #responsesBodyIdleMs: number
   /** Sibling host for one replay of a refused attempt; null when there is none. */
   readonly #siblingBaseUrl: string | null
+  /**
+   * Optional local-opencode delegate (issue #76). Armed only when the user
+   * opts in via `delegation.enabled`; null/undefined keeps the anonymous path
+   * byte-for-byte unchanged.
+   */
+  readonly #delegate: DelegationDelegate | null
 
   constructor(catalog: CatalogLike, options: {
     zenBaseUrl?: string
@@ -355,12 +373,15 @@ export class ZenAdapter {
     bodyIdleMs?: number
     /** Overrides RESPONSES_BODY_IDLE_MS (watchdog tests inject short ones). */
     responsesBodyIdleMs?: number
+    /** Local-opencode delegate for the persistent FreeTierError fallback. */
+    delegate?: DelegationDelegate | null
   } = {}) {
     this.#catalog = catalog
     this.#firstEventMs = options.firstEventMs ?? DEFAULT_FIRST_EVENT_MS
     this.#bodyIdleMs = options.bodyIdleMs ?? DEFAULT_BODY_IDLE_MS
     this.#responsesBodyIdleMs = options.responsesBodyIdleMs ?? RESPONSES_BODY_IDLE_MS
     this.#siblingBaseUrl = siblingZenBaseUrl(options.zenBaseUrl ?? ZEN_BASE_URL)
+    this.#delegate = options.delegate ?? null
     if (options.providerOverride !== undefined) {
       this.#provider = options.providerOverride as never
       this.#responsesProvider = null
@@ -547,6 +568,28 @@ export class ZenAdapter {
     }
   }
 
+  /**
+   * Run the turn through the local-opencode delegate, all-or-nothing. Returns
+   * the complete chunk stream on success, or null when the delegate is not
+   * usable (no credential), declines, or fails — in which case the caller falls
+   * back to the anonymous lane's honest error. The result is buffered before
+   * returning so a partial delegate stream can never leak to the caller.
+   */
+  async #runDelegation(options: HarnessGenerateOptions, context: PiContext): Promise<HarnessChunk[] | null> {
+    const delegate = this.#delegate
+    if (!delegate) return null
+    try {
+      if (!(await delegate.ready())) return null
+      const chunks: HarnessChunk[] = []
+      for await (const chunk of delegate.stream(options, context)) chunks.push(chunk)
+      return chunks
+    } catch {
+      // The delegate logs its own progress/errors via its log sink; from the
+      // adapter's perspective a failed delegation simply means "fall back".
+      return null
+    }
+  }
+
   /** Stream one attempt from the Zen anonymous lane.
    *
    * IP-7 rotate loop (docs/ip-pool.md §3.4 / §8.1): a stream that dies
@@ -727,6 +770,19 @@ export class ZenAdapter {
           || (failure === 'refused' && attempt < 1))
       rotateStory.push(`#${attempt + 1} ${failure ?? 'unknown'}: ${failureMessage.slice(0, 80)}`)
       if (!rotate) {
+        // Persistent anonymous-lane refusal (issue #76): when the direct attempt
+        // AND the sibling replay both 403'd with the FreeTierError credential
+        // gate, and the user opted into delegation, run the turn through the
+        // local opencode runtime instead of surfacing the error. Any other
+        // failure class, a disabled delegate, a missing credential, or a failed
+        // delegation all fall through to the honest error below.
+        if (this.#delegate !== null && attempt >= 1 && isFreeTierRefusal(failureMessage)) {
+          const delegated = await this.#runDelegation(options, context)
+          if (delegated !== null) {
+            for (const chunk of delegated) yield chunk
+            return
+          }
+        }
         // last resort: rewrite the terminal error to tell the whole story
         // (the user saw minutes of silence — the surfaced error must say
         // what was tried, not just the last attempt's failure)

@@ -85,6 +85,21 @@ dsh plugin --profile web add ./opencode2dsh-dsh-plugin-<version>.tgz
 | `restartDelayMs` / `restartMaxDelayMs` / `maxConsecutiveCrashes` | `1000` / `60000` / `5` | 仅 sidecar：重启退避与熔断阈值。 |
 | `firstEventMs` / `bodyIdleMs` / `responsesBodyIdleMs` | `30000` / `120000` / `300000` | 仅 adapter，插件 0.3.7 起支持：流存活超时，单位毫秒，取 `1` 到 `600000` 的整数。分别控制首事件等待、流中静默，以及 Responses 模型（`muse-spark-*`）的静默下限。冷启动慢时可调大 `firstEventMs`。不设置则使用默认值；修改后重启 DSH。 |
 
+**本地 OpenCode 委托**（插件 0.3.x，[docs/delegation.md](docs/delegation.md)，ref #76）——针对持续 `403 FreeTierError` 凭据门禁的可选兜底。默认关闭；除非显式开启，匿名路径与现状逐字节一致：
+
+```yaml
+    delegation:
+      enabled: true        # 总开关，默认 false
+      # opencodePath: ''   # 显式指定 opencode 二进制；否则 managed → 全局 → npm
+      # minVersion: '1.18.0'  # 低于此版本的候选直接跳过
+      # memLimit: '96MiB'  # 注入子进程的 GOMEMLIMIT
+      # gcPercent: 30      # 注入子进程的 GOGC
+      # trimIntervalMs: 60000  # Windows EmptyWorkingSet 节拍；0 关闭
+      # startTimeoutMs: 60000  # 健康等待预算
+```
+
+开启后插件会保管你的 opencode 凭据（只取 `opencode` 一个条目，0600 种进隔离 XDG 根，绝不写日志），并仅在匿名车道**与**姊妹主机重试都被凭据门禁拒绝时，才把回合交给受管的本地 `opencode serve`。开启前请先读 [docs/delegation.md](docs/delegation.md) §2 的安全说明。
+
 ## 工作原理
 
 ```
@@ -133,7 +148,7 @@ https://opencode.ai/zen/v1        ← Authorization: Bearer public
 
 | 现象 | 可能原因与处理 |
 | --- | --- |
-| `403 FreeTierError` / "OpenCode's free tier can only be used from within OpenCode" | 上游限制免费通道的客户端，插件会保留该说明；这不是个人 API 密钥错误。请使用上游支持的 OpenCode 客户端或正式 API 服务。 |
+| `403 FreeTierError` / "OpenCode's free tier can only be used from within OpenCode" | 上游限制免费通道的客户端，插件会保留该说明；这不是个人 API 密钥错误。请使用上游支持的 OpenCode 客户端或正式 API 服务。若拒绝是**持续的**（直连 + 姊妹主机都 403，而请求形状/IP 都干净），issue #76 的可选[本地委托](docs/delegation.md)会让回合改走你自己的 `opencode` 登录——读完安全说明后再开启 `delegation.enabled`。 |
 | 启动页报 `Failed to load plugins … list slot "plugins.item" requires options.id`，或 IP 池条目没有配置页 | DSH 早于 0.1.7 的插件页契约。升级 DSH 到 0.1.7（推荐最新）；页面挂载门控是 `configForms.whileServed`，0.1.6 及更早上整页不出现，模型路由不受影响。 |
 | 安装插件后 DSH 0.1.7/0.2 无法启动，报 `pending … settingsScope` | 更新插件到 0.3.5；DSH 0.2 的 IP 池设置在插件页的 opencode2dsh 条目里。 |
 | 只有 3 个模型 | 启动时网络未就绪，重试会在约 1 分钟内补齐；看 `adapter-status.json` 里的 `lastError`。 |
@@ -149,6 +164,7 @@ https://opencode.ai/zen/v1        ← Authorization: Bearer public
 - 不涉及任何机密：匿名通道的 Key 就是字面量 `public`；插件不存储任何东西，也没有任何遥测。
 - 安装产物仅限 `lib/`；不执行任何依赖的构建脚本。
 - 所有请求均从你的机器直连 `opencode.ai` / `models.dev`。
+- 本地 OpenCode 委托（[docs/delegation.md](docs/delegation.md)，ref #76）**默认关闭、需显式开启**。开启后插件将保管你的 opencode 凭据——只取 `opencode` 一个条目，0600 种进隔离 XDG 根，绝不写日志，除本地子进程外绝不外发——并经由受管的本地 `opencode serve` 代理。若上游因此判定异常使用，后果由你的账号承担。在你机器上执行工具被三层纵深挡住（ask-then-reject + 响应体扫描 + 环境隔离），详见文档。
 
 ## 开发
 

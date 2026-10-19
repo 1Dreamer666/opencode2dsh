@@ -4,9 +4,10 @@ import { existsSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 
 import { ModelCatalog, defaultCachePath, type CatalogSnapshot } from './adapter/catalog.ts'
+import { OpencodeDelegate, type DelegationDelegate } from './adapter/delegate.ts'
 import { ZenAdapter, PROVIDER_ID } from './adapter/zen-adapter.ts'
 import { AgentProcess, type ReadyInfo } from './agent-process.ts'
-import { Config, configPaths, ensureToken, ordinaryConfig, resolveConfig, writeAgentConfig, type Opencode2dshConfig, type ResolvedPluginConfig } from './config.ts'
+import { Config, configPaths, ensureToken, ordinaryConfig, resolveConfig, writeAgentConfig, type DelegationConfig, type Opencode2dshConfig, type ResolvedPluginConfig } from './config.ts'
 import { applyIpPoolSettings } from './ip-pool-settings/apply.ts'
 import { readVolatile, type IpPoolSettings } from './ip-pool-settings/namespace.ts'
 import { fetchHealth, fetchModels, registerProvider, removeProviderRoute } from './provider.ts'
@@ -156,10 +157,15 @@ function applyAdapter(
       }
     },
   })
+  // Local OpenCode delegation (issue #76): armed only on explicit opt-in. The
+  // delegate is created lazily-usable (no process spawn until the first
+  // persistent refusal) and disposed with the fiber below.
+  const delegate = createDelegate(cfg.delegation, join(dataDir, 'delegate'), logger)
   const adapter = new ZenAdapter(catalog, {
     firstEventMs: cfg.firstEventMs,
     bodyIdleMs: cfg.bodyIdleMs,
     responsesBodyIdleMs: cfg.responsesBodyIdleMs,
+    delegate,
   })
 
   // Register FIRST: the provider must appear in the selector right away. The
@@ -218,9 +224,35 @@ function applyAdapter(
     maybeEffect.call(ctx, () => () => {
       disposed = true
       catalog.stop()
+      // Reap the delegated opencode child (no-op when delegation never armed).
+      void delegate?.dispose()
     })
   }
   return { ready }
+}
+
+/**
+ * Build the local-opencode delegate, or null when the feature is off. The
+ * opt-in gate is deliberate (issue #76): enabling delegation makes the plugin a
+ * credential custodian, so it must never be armed silently. When disabled the
+ * adapter receives null and its anonymous path is byte-for-byte unchanged.
+ */
+function createDelegate(
+  delegation: DelegationConfig | undefined,
+  dataDir: string,
+  logger: PluginContext['logger'],
+): DelegationDelegate | null {
+  if (!delegation?.enabled) return null
+  return new OpencodeDelegate({
+    dataDir,
+    opencodePath: delegation.opencodePath?.trim() ? delegation.opencodePath.trim() : undefined,
+    minVersion: delegation.minVersion,
+    memLimit: delegation.memLimit,
+    gcPercent: delegation.gcPercent,
+    trimIntervalMs: delegation.trimIntervalMs,
+    startTimeoutMs: delegation.startTimeoutMs,
+    log: (message) => logger.info(message),
+  })
 }
 
 function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: Promise<ReadyInfo> } {

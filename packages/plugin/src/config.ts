@@ -5,6 +5,13 @@ import { platform } from 'node:process'
 
 import Schema from '@deepseek-ai/schemastery'
 
+import {
+  DEFAULT_GC_PERCENT,
+  DEFAULT_MEM_LIMIT,
+  DEFAULT_START_TIMEOUT_MS,
+  DEFAULT_TRIM_INTERVAL_MS,
+  MIN_OPENCODE_VERSION,
+} from './adapter/delegate.ts'
 import { IpPoolConfigSchema, type IpPoolSettings, type VolatileRef } from './ip-pool-settings/namespace.ts'
 
 /**
@@ -55,6 +62,42 @@ export interface Opencode2dshConfig {
    * the cordis.patch.yml seam.
    */
   ipPool?: IpPoolConfig
+  /**
+   * Local OpenCode delegation (docs/delegation.md, issue #76). Opt-in: when
+   * `enabled` is true the plugin custodies the user's opencode credential and,
+   * on a persistent anonymous-lane refusal (direct + sibling both 403
+   * FreeTierError), runs the turn through a managed local `opencode serve`.
+   * Disabled/absent keeps the anonymous path byte-for-byte unchanged.
+   */
+  delegation?: DelegationConfig
+}
+
+/**
+ * Local OpenCode delegation settings (docs/delegation.md §config). Ordinary
+ * plugin config (set via cordis.patch.yml), not a live settings form.
+ */
+export interface DelegationConfig {
+  /**
+   * Master switch. Default false: the plugin stays a stateless anonymous
+   * client and never touches the user's credential. Enabling makes the plugin a
+   * credential custodian — read docs/delegation.md first.
+   */
+  enabled?: boolean
+  /**
+   * Explicit path to an opencode binary. When set, the managed/global/npm
+   * resolution is skipped and this binary is used (still version-checked).
+   */
+  opencodePath?: string
+  /** Lowest opencode version the delegate will use (default 1.18.0, the free-tier floor). */
+  minVersion?: string
+  /** GOMEMLIMIT injected into the child (Go heap soft cap). Default 96MiB. */
+  memLimit?: string
+  /** GOGC injected into the child. Default 30. */
+  gcPercent?: number
+  /** EmptyWorkingSet memory-trim interval ms; 0 disables trimming. Default 60000. */
+  trimIntervalMs?: number
+  /** Health-wait budget for the spawned server, ms. Default 60000. */
+  startTimeoutMs?: number
 }
 
 /** docs/ip-pool.md section 5.1 schema (subset owned by config today). */
@@ -166,6 +209,28 @@ export const Config = Schema.object({
   responsesBodyIdleMs: Schema.number().step(1).min(1).max(600_000),
   /** The ip-pool settings form (docs/ip-pool.md §5.1); served as this entry. */
   ipPool: IpPoolConfigSchema.volatile(),
+  /**
+   * Local OpenCode delegation (docs/delegation.md, issue #76). Ordinary config
+   * (not a live settings form): flipping it means editing the profile patch, so
+   * the credential-custody decision stays a deliberate, reviewed act rather
+   * than a settings-page toggle. Absent = the anonymous path, unchanged.
+   */
+  delegation: Schema.object({
+    /** Master switch; default false keeps the plugin a stateless anonymous client. */
+    enabled: Schema.boolean().default(false),
+    /** Explicit opencode binary path (skips managed/global/npm resolution). */
+    opencodePath: Schema.string().default(''),
+    /** Lowest opencode version the delegate will use (free-tier floor). */
+    minVersion: Schema.string().default(MIN_OPENCODE_VERSION),
+    /** GOMEMLIMIT injected into the child (Go heap soft cap). */
+    memLimit: Schema.string().default(DEFAULT_MEM_LIMIT),
+    /** GOGC injected into the child. */
+    gcPercent: Schema.number().step(1).min(1).max(500).default(DEFAULT_GC_PERCENT),
+    /** EmptyWorkingSet memory-trim interval ms; 0 disables trimming. */
+    trimIntervalMs: Schema.number().step(1).min(0).default(DEFAULT_TRIM_INTERVAL_MS),
+    /** Health-wait budget for the spawned server, ms. */
+    startTimeoutMs: Schema.number().step(1).min(1_000).default(DEFAULT_START_TIMEOUT_MS),
+  }),
 })
 
 /**

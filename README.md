@@ -89,6 +89,21 @@ Defaults work out of the box. Override via the profile's `cordis.patch.yml`:
 | `restartDelayMs` / `restartMaxDelayMs` / `maxConsecutiveCrashes` | `1000` / `60000` / `5` | Sidecar only: restart backoff and circuit breaker. |
 | `firstEventMs` / `bodyIdleMs` / `responsesBodyIdleMs` | `30000` / `120000` / `300000` | Adapter only, plugin 0.3.7+: stream-liveness watchdogs, in ms (integers from `1` to `600000`). Time to the first stream event, mid-response body silence, and the body-idle floor for Responses models (`muse-spark-*`). Increase `firstEventMs` for slow cold starts. Unset keeps the defaults; restart DSH after editing. |
 
+**Local OpenCode delegation** (plugin 0.3.x, [docs/delegation.md](docs/delegation.md), ref #76) — opt-in fallback for the persistent `403 FreeTierError` credential gate. Disabled by default; the anonymous path is unchanged unless you enable it:
+
+```yaml
+    delegation:
+      enabled: true        # arm the delegate (default false)
+      # opencodePath: ''   # explicit binary; else managed -> global -> npm
+      # minVersion: '1.18.0'  # candidates below this are skipped
+      # memLimit: '96MiB'  # GOMEMLIMIT for the child
+      # gcPercent: 30      # GOGC for the child
+      # trimIntervalMs: 60000  # Windows EmptyWorkingSet tick; 0 disables
+      # startTimeoutMs: 60000  # health-wait budget
+```
+
+Enabling it makes the plugin custody your opencode credential (only the `opencode` entry, seeded 0600 into an isolated XDG root, never logged) and run a managed local `opencode serve` when — and only when — the anonymous lane *and* its sibling retry both refuse with the credential gate. Read [docs/delegation.md](docs/delegation.md) §2 before enabling.
+
 ## How it works
 
 ```
@@ -142,7 +157,7 @@ The plugin writes a health snapshot after every refresh round:
 
 | Symptom | Likely cause & fix |
 | --- | --- |
-| `403 FreeTierError` / "OpenCode's free tier can only be used from within OpenCode" | The upstream restricts free-tier clients. The plugin preserves the explanation instead of reporting an invalid API key. Use the supported OpenCode client or an official API service. |
+| `403 FreeTierError` / "OpenCode's free tier can only be used from within OpenCode" | The upstream restricts free-tier clients. The plugin preserves the explanation instead of reporting an invalid API key. Use the supported OpenCode client or an official API service. If the refusal is *persistent* (direct + sibling both 403 while your shape/IP are clean), issue #76's opt-in [local delegation](docs/delegation.md) runs the turn through your own `opencode` login — enable `delegation.enabled` after reading its security notes. |
 | Boot screen shows `Failed to load plugins … list slot "plugins.item" requires options.id`, or the IP 池 entry has no configuration page | Your DSH predates the 0.1.7 Plugins page contract. Upgrade DSH to 0.1.7 (latest recommended). On 0.1.6 and older the page never mounts (it is gated on `configForms.whileServed`) — model routing is unaffected. |
 | DSH 0.1.7/0.2 cannot start after plugin installation (`pending … settingsScope`) | Upgrade the plugin to 0.3.5. On DSH 0.2, configure IP pooling through the installed opencode2dsh row on the Plugins page. |
 | Only 3 models | Startup fetch raced your network; retries land within ~1 min. Check `adapter-status.json` for `lastError`. |
@@ -158,6 +173,7 @@ The plugin writes a health snapshot after every refresh round:
 - No secrets involved: the anonymous lane's key is the literal string `public`; nothing is stored, nothing telemetry.
 - Install paths restricted to `lib/` only; no build scripts run from dependencies.
 - All requests go directly from your machine to `opencode.ai` / `models.dev`.
+- Local OpenCode delegation ([docs/delegation.md](docs/delegation.md), ref #76) is **opt-in and off by default**. Enabling it makes the plugin custody your opencode credential — only the `opencode` entry, seeded 0600 into an isolated XDG root, never logged, never sent anywhere but the local child — and proxy it through a managed local `opencode serve`. If upstream deems that abnormal use, your account bears the consequence. Tool execution on your machine is prevented in depth (ask-then-reject + response scan + isolated env); see the doc.
 
 ## Development
 
