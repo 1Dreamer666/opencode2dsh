@@ -80,6 +80,7 @@ dsh plugin --profile web add ./opencode2dsh-dsh-plugin-<version>.tgz
 | `mode` | `adapter` | `adapter`：原生 LlmAdapter 直连 Zen。`sidecar`：旧版本地 agent 模式，不随包发行——请从 `legacy/agent` 自行构建并通过 `agentPath` 指定。 |
 | `providerId` | `opencode2dsh` | 在 DSH 中显示的 provider 名称。 |
 | `refreshSeconds` | `300` | 实时目录刷新间隔；定价元数据每 24 小时刷新。 |
+| `allowedModels` | `[]` | 模型白名单（插件 0.3.14 起，issue #83）：DSH 可展示和调用的模型 id，精确匹配。留空则暴露全部符合条件的免费模型。只做收敛——付费/弃用/本地阻止/探活规则仍然生效，直调名单外模型会被明确拒绝。 |
 | `agentPath` | 自动解析 | 仅 sidecar：agent 二进制路径。 |
 | `agentArgs` | — | 仅 sidecar：传给 agent 的额外 CLI 参数。 |
 | `restartDelayMs` / `restartMaxDelayMs` / `maxConsecutiveCrashes` | `1000` / `60000` / `5` | 仅 sidecar：重启退避与熔断阈值。 |

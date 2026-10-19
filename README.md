@@ -84,6 +84,7 @@ Defaults work out of the box. Override via the profile's `cordis.patch.yml`:
 | `mode` | `adapter` | `adapter`: native LlmAdapter streaming straight from Zen. `sidecar`: legacy local-agent mode, not bundled — build the agent from `legacy/agent` and pass `agentPath`. |
 | `providerId` | `opencode2dsh` | Provider name shown in DSH. |
 | `refreshSeconds` | `300` | Live catalog refresh interval. Pricing metadata refreshes every 24 h. |
+| `allowedModels` | `[]` | Model whitelist (plugin 0.3.14+, issue #83): exact model ids DSH may show and call. Empty exposes every eligible free-lane model. Narrowing only — paid/deprecated/blocklist/probe rules still win, and a direct call to a non-whitelisted id is denied. |
 | `agentPath` | auto-resolved | Sidecar only: path to the agent binary. |
 | `agentArgs` | — | Sidecar only: extra CLI args for the agent. |
 | `restartDelayMs` / `restartMaxDelayMs` / `maxConsecutiveCrashes` | `1000` / `60000` / `5` | Sidecar only: restart backoff and circuit breaker. |
