@@ -371,8 +371,8 @@ export class ModelCatalog {
     // First adaptive-probe round: after warm()'s 4s window so a real catalog
     // is in place (probe results decide picker visibility for the probe set).
     if (!this.#probeDisabled) {
-      const probeTimer = setTimeout(() => void this.probeOnce(), 5_000)
-      probeTimer.unref?.()
+      this.#probeTimer = setTimeout(() => void this.probeOnce(), 5_000)
+      this.#probeTimer.unref?.()
     }
   }
 
@@ -541,19 +541,31 @@ export class ModelCatalog {
    */
   async #probeRound(): Promise<void> {
     if (this.#stopped) return
-    const ids = [...FREE_LANE_PROBE_SET].filter((id) => this.#zen.has(id))
-    if (ids.length === 0) return
     const nextRound = () => {
       if (this.#stopped || this.#probeDisabled) return
       this.#probeTimer = setTimeout(() => void this.probeOnce(), this.#probeIntervalMs)
       this.#probeTimer.unref?.()
+    }
+    const ids = [...FREE_LANE_PROBE_SET].filter((id) => this.#zen.has(id))
+    // An empty catalog (flaky network at boot) must NOT end the probe chain:
+    // keep the round timer alive so a later catalog fill still gets probed —
+    // the flaky-VPN boot is exactly the host this probe exists for.
+    if (ids.length === 0) {
+      nextRound()
+      return
     }
     for (const model of ids) {
       const api = apiForModel(model)
       const verdict = await this.#probeImpl(model, api).catch(() => 'error' as ProbeVerdict)
       this.#probeVerdicts.set(model, verdict)
     }
-    this.#onRefresh?.(this.snapshot(), this.#lastError)
+    if (this.#onRefresh) {
+      try {
+        this.#onRefresh(this.snapshot(), this.#lastError)
+      } catch {
+        // observers must never break the probe loop (same rule as #refreshRound)
+      }
+    }
     nextRound()
   }
 

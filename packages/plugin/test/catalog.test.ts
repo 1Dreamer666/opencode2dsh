@@ -696,7 +696,11 @@ test('adaptive probe: a pass exposes the muse ids, a refusal keeps them hidden',
     }),
     probeDisabled: true, // no background timer; drive the round manually
     probeImpl: async (model, api) => {
-      assert.equal(api, 'openai-responses', 'muse ids speak the Responses lane')
+      // Per-model lane routing (routing.ts apiForModel): a wrong api here
+      // throws INSIDE the probe, where #probeRound's .catch maps it to
+      // 'error' and this suite would bless the accident — assert loudly.
+      const expectedApi = model.startsWith('muse-spark') ? 'openai-responses' : 'openai-completions'
+      assert.equal(api, expectedApi, `${model} speaks the ${expectedApi} lane`)
       return model.includes('1.3') ? 'pass' : 'refused'
     },
   })
@@ -710,11 +714,67 @@ test('adaptive probe: a pass exposes the muse ids, a refusal keeps them hidden',
     assert.equal(catalog.decision('muse-spark-1.2-contributor-free').allowed, false, 'refused probe stays hidden')
     assert.ok(!FREE_LANE_BLOCKLIST.has('muse-spark-1.3-contributor-free'), 'the never-serve blocklist shrunk to protocol-level denials')
     assert.deepEqual(catalog.probeVerdicts(), {
-      'exo-free': 'error',
-      'ling-3.0-flash-fin-free': 'error',
+      'exo-free': 'refused',
+      'ling-3.0-flash-fin-free': 'refused',
       'muse-spark-1.2-contributor-free': 'refused',
       'muse-spark-1.3-contributor-free': 'pass',
     }, 'verdicts are exposed for healthz')
+  } finally {
+    catalog.stop()
+  }
+})
+
+test('adaptive probe: a live->blocked flip hides the model on the next round', async () => {
+  // The verdict map is per boot, so a pass early in the boot must be
+  // revocable when a later round refuses — upstream blocks move, both ways.
+  let verdict: 'pass' | 'refused' = 'pass'
+  const catalog = new ModelCatalog({
+    fetchImpl: fakeFetch({
+      [ZEN_MODELS_URL]: { data: [{ id: 'muse-spark-1.3-contributor-free' }] },
+    }),
+    probeDisabled: true,
+    probeImpl: async () => verdict,
+  })
+  try {
+    await catalog.refreshOnce()
+    await catalog.probeOnce()
+    assert.deepEqual(catalog.list(), ['muse-spark-1.3-contributor-free'], 'pass exposes the id')
+    verdict = 'refused'
+    await catalog.probeOnce()
+    assert.equal(catalog.decision('muse-spark-1.3-contributor-free').allowed, false, 'a later refusal hides it again')
+    assert.deepEqual(catalog.probeVerdicts(), { 'muse-spark-1.3-contributor-free': 'refused' })
+  } finally {
+    catalog.stop()
+  }
+})
+
+test('adaptive probe: an empty catalog at boot does not kill the probe chain', async () => {
+  // Regression: #probeRound's empty-catalog path used to `return` before
+  // nextRound(), so a flaky-VPN boot (catalog still empty when the first
+  // probe fires, warm()'s retries exhausted) left the probe set hidden for
+  // the whole boot — exactly the host this probe exists for.
+  let zenUp = false
+  const catalog = new ModelCatalog({
+    fetchImpl: (async (url: string) => {
+      if (!zenUp || !url.includes('/v1/models')) {
+        return { ok: false, status: 503, json: async () => ({}) } as never
+      }
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: 'muse-spark-1.3-contributor-free' }] }) } as never
+    }) as never,
+    probeIntervalMs: 40,
+    probeImpl: async () => 'pass',
+  })
+  try {
+    // nothing in the live catalog yet: the round finds nothing to probe but
+    // must still reschedule itself
+    await catalog.probeOnce()
+    assert.deepEqual(catalog.probeVerdicts(), {}, 'no verdicts while the catalog is empty')
+    // network heals; the rescheduled round fires on its own and exposes the id
+    zenUp = true
+    await catalog.refreshOnce()
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.deepEqual(catalog.probeVerdicts(), { 'muse-spark-1.3-contributor-free': 'pass' })
+    assert.deepEqual(catalog.list(), ['muse-spark-1.3-contributor-free'])
   } finally {
     catalog.stop()
   }
