@@ -278,8 +278,11 @@ export class PoolRoutingDispatcher implements RoutingDispatcherSurface {
    * (live repro: 10.255.255.1:9999 blackhole, seen:[] callbacks). So the
    * wrapper arms a timer at dispatch time; any handler callback disarms it,
    * and silence past the deadline counts as a transport failure (dead strike
-   * + session reroute). The sentinel never aborts the request itself — fetch
-   * and pi-ai own their own timeouts.
+   * + session reroute) — on that silence path ONLY the sentinel synthesizes
+   * the response-error the handler owes and aborts the controller (fetch
+   * rejects at once instead of hanging forever). A real onResponseError is
+   * forwarded untouched; the sentinel never injects alongside a genuine
+   * failure (#87).
    */
   #observe(exitId: string, model: string, session: string, handler: Dispatcher.DispatchHandler): Dispatcher.DispatchHandler {
     const pool = this.#pool
@@ -298,22 +301,33 @@ export class PoolRoutingDispatcher implements RoutingDispatcherSurface {
     // The most recent controller the wrapper has seen (undici hands a fresh
     // one to each handler callback; abort must go to the live one).
     let liveController: { abort?(reason: Error): void } | null = null
-    const classifyTransport = (): void => {
-      if (classified) return
+    /** Record the transport-grade failure once. Returns true only for the
+     *  caller that actually classified the dispatch. */
+    const recordTransport = (): boolean => {
+      if (classified) return false
       classified = true
       pool.recordPassiveTransport(exitId)
       pool.rerouteSession(session)
-      // Live-observed (2026-09-07, muse via 7897): after the tunnel stands a
-      // dead-behind-the-tunnel exit answers NOTHING — no headers, no
-      // onResponseError — and neither fetch nor pi-ai owns a body-silence
-      // timeout, so the request hangs forever (the turn never finished; the
-      // stop button's abort never reached it). The sentinel therefore does
-      // more than bookkeeping: it tears the dispatch down BOTH ways — abort
-      // the controller when we have one, and when the blackhole path never
-      // handed us a single callback (no controller exists) synthesize the
-      // response-error the handler owes, so fetch rejects at once, pi-ai
-      // turns that into an error event, and the adapter's rotate loop gets
-      // to move the session to a live exit.
+      return true
+    }
+    /**
+     * Sentinel-only teardown. Live-observed (2026-09-07, muse via 7897): after
+     * the tunnel stands a dead-behind-the-tunnel exit answers NOTHING — no
+     * headers, no onResponseError — and neither fetch nor pi-ai owns a
+     * body-silence timeout, so the request hangs forever (the turn never
+     * finished; the stop button's abort never reached it). When the blackhole
+     * path never handed us a single callback there is no failure to read, so
+     * the sentinel synthesizes the response-error the handler owes (and aborts
+     * any controller it did see) — fetch rejects at once, pi-ai turns that
+     * into an error event, and the adapter's rotate loop gets to move the
+     * session to a live exit.
+     *
+     * Injection belongs here and nowhere else. A real `onResponseError` means
+     * undici already reported the failure to us, so forwarding it is enough;
+     * racing it with a synthesized one only loses the original.
+     */
+    const sentinelTeardown = (): void => {
+      if (!recordTransport()) return
       const reason = new Error('opencode2dsh: exit response silence')
       if (typeof handler.onResponseError === 'function') {
         ;(handler.onResponseError as (c: unknown, e: Error) => void).call(handler, liveController ?? ({} as never), reason)
@@ -334,7 +348,7 @@ export class PoolRoutingDispatcher implements RoutingDispatcherSurface {
     const armSentinel = (): void => {
       clearTimeout(sentinel)
       const window = sawRequestStart ? this.#headersMs : this.#sentinelMs
-      sentinel = setTimeout(classifyTransport, window)
+      sentinel = setTimeout(sentinelTeardown, window)
       sentinel.unref?.()
     }
     let sawRequestStart = false
@@ -375,7 +389,8 @@ export class PoolRoutingDispatcher implements RoutingDispatcherSurface {
       onResponseError: (controller, error) => {
         liveController = controller
         disarm()
-        classifyTransport()
+        // Bookkeeping only: the real error below is what the handler must see.
+        recordTransport()
         forward('onResponseError', [controller, error])
       },
       onResponseStarted: () => {
