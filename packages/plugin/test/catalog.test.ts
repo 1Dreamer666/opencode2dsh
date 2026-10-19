@@ -779,3 +779,162 @@ test('adaptive probe: an empty catalog at boot does not kill the probe chain', a
     catalog.stop()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Issue #83: the allowedModels whitelist (narrowing pass, never an override)
+// ---------------------------------------------------------------------------
+
+test('allowedModels: omitted or empty keeps the roster byte-identical (issue #83)', async () => {
+  const routes = { [ZEN_MODELS_URL]: zenBody, 'https://models.dev/api.json': metadataBody }
+  const plain = new ModelCatalog({ fetchImpl: fakeFetch(routes) })
+  try {
+    await plain.refreshOnce()
+    const golden = plain.list()
+    assert.deepEqual(golden, ['qwen-free'])
+    const empty = new ModelCatalog({ fetchImpl: fakeFetch(routes), allowedModels: [] })
+    try {
+      await empty.refreshOnce()
+      assert.deepEqual(empty.list(), golden, 'an empty whitelist is no whitelist')
+      assert.deepEqual(empty.decision('qwen-free'), plain.decision('qwen-free'))
+    } finally {
+      empty.stop()
+    }
+  } finally {
+    plain.stop()
+  }
+})
+
+test('allowedModels narrows the live roster and the bootstrap path (issue #83)', async () => {
+  const routes = { [ZEN_MODELS_URL]: zenBody, 'https://models.dev/api.json': metadataBody }
+  const catalog = new ModelCatalog({ fetchImpl: fakeFetch(routes), allowedModels: ['qwen-free', 'not-in-catalog'] })
+  try {
+    await catalog.refreshOnce()
+    assert.deepEqual(catalog.list(), ['qwen-free'], 'picker exposure is whitelist ∩ eligible free models')
+    assert.equal(catalog.snapshot().exposed, 1)
+  } finally {
+    catalog.stop()
+  }
+  // an id the catalog does not know can never be added by whitelisting it
+  const ghosts = new ModelCatalog({ fetchImpl: fakeFetch(routes), allowedModels: ['ghost-id-free'] })
+  try {
+    await ghosts.refreshOnce()
+    assert.deepEqual(ghosts.list(), [])
+  } finally {
+    ghosts.stop()
+  }
+  // cold catalog (bootstrap list): S3 narrows through the same gate
+  const cold = new ModelCatalog({ fetchImpl: fakeFetch({ 'https://models.dev/api.json': metadataBody }), allowedModels: ['big-pickle'] })
+  try {
+    assert.deepEqual(cold.list(), ['big-pickle'], 'the bootstrap path respects the whitelist')
+  } finally {
+    cold.stop()
+  }
+})
+
+test('allowedModels never bypasses blocklist, probe verdicts, or metadata (issue #83)', async () => {
+  // every rule that denies an id keeps denying it after whitelisting, and the
+  // denial source stays the REAL reason — the whitelist is a narrowing pass
+  // at the end of the chain, never an override
+  const allFree = {
+    opencode: {
+      models: {
+        'qwen-free': { cost: { input: 0, output: 0 } },
+        'paid-model': { cost: { input: 1, output: 2 } },
+        'legacy-free': { status: 'deprecated', cost: { input: 0, output: 0 } },
+        ...Object.fromEntries([...FREE_LANE_BLOCKLIST].map((id) => [id, { cost: { input: 0, output: 0 } }] as const)),
+      },
+    },
+  }
+  const zenIds = [...FREE_LANE_BLOCKLIST, 'qwen-free', 'paid-model', 'legacy-free']
+  const catalog = new ModelCatalog({
+    fetchImpl: fakeFetch({ [ZEN_MODELS_URL]: { data: zenIds.map((id) => ({ id })) }, 'https://models.dev/api.json': allFree }),
+    allowedModels: [...FREE_LANE_BLOCKLIST, 'muse-spark-1.2-contributor-free', 'paid-model', 'legacy-free', 'qwen-free'],
+    probeDisabled: true,
+  })
+  try {
+    await catalog.refreshOnce()
+    for (const id of FREE_LANE_BLOCKLIST) {
+      assert.deepEqual(catalog.decision(id), { allowed: false, source: 'local_blocklist', known: true }, `${id}: the blocklist outranks the whitelist`)
+    }
+    assert.deepEqual(catalog.decision('paid-model'), { allowed: false, source: 'metadata_paid', known: true }, 'paid metadata outranks the whitelist')
+    assert.deepEqual(catalog.decision('legacy-free'), { allowed: false, source: 'metadata_deprecated', known: true }, 'deprecation outranks the whitelist')
+    // a whitelisted probe-set id stays hidden until THIS host's probe passes
+    assert.deepEqual(catalog.decision('muse-spark-1.2-contributor-free'), { allowed: false, source: 'probe_pending', known: false })
+    assert.deepEqual(catalog.list(), ['qwen-free'])
+  } finally {
+    catalog.stop()
+  }
+
+  // the moment the probe passes, the whitelisted probe id IS exposed — the
+  // whitelist composes with the probe verdict, it does not fight it
+  const probed = new ModelCatalog({
+    fetchImpl: fakeFetch({ [ZEN_MODELS_URL]: { data: [{ id: 'muse-spark-1.2-contributor-free' }] } }),
+    allowedModels: ['muse-spark-1.2-contributor-free'],
+    probeDisabled: true,
+    probeImpl: async () => 'pass',
+  })
+  try {
+    await probed.refreshOnce()
+    await probed.probeOnce()
+    assert.deepEqual(probed.list(), ['muse-spark-1.2-contributor-free'])
+  } finally {
+    probed.stop()
+  }
+})
+
+test('decision() denies a non-whitelisted free id with the distinct source (issue #83)', async () => {
+  const catalog = new ModelCatalog({
+    fetchImpl: fakeFetch({
+      [ZEN_MODELS_URL]: { data: [{ id: 'qwen-free' }, { id: 'extra-free' }] },
+      'https://models.dev/api.json': {
+        opencode: {
+          models: {
+            'qwen-free': { cost: { input: 0, output: 0 } },
+            'extra-free': { cost: { input: 0, output: 0 } },
+          },
+        },
+      },
+    }),
+    allowedModels: ['qwen-free'],
+  })
+  try {
+    await catalog.refreshOnce()
+    assert.deepEqual(catalog.list(), ['qwen-free'])
+    // an otherwise-exposed free id gets the actionable denial, not a silent
+    // disappearance into the metadata vocabulary
+    assert.deepEqual(catalog.decision('extra-free'), { allowed: false, source: 'not_in_whitelisted', known: true })
+  } finally {
+    catalog.stop()
+  }
+  // the whitelist outranks even the S3 static vouch (big-pickle is
+  // compile-time verified): narrowing applies to the bootstrap path too
+  const cold = new ModelCatalog({ fetchImpl: fakeFetch({}), allowedModels: ['mimo-v2.6-flash-free'] })
+  try {
+    assert.deepEqual(cold.decision('big-pickle'), { allowed: false, source: 'not_in_whitelisted', known: true })
+    assert.deepEqual(cold.list(), ['mimo-v2.6-flash-free'])
+  } finally {
+    cold.stop()
+  }
+})
+
+test('the adaptive probe skips ids the whitelist excludes (issue #83)', async () => {
+  const probed: string[] = []
+  const catalog = new ModelCatalog({
+    fetchImpl: fakeFetch({ [ZEN_MODELS_URL]: { data: [...FREE_LANE_PROBE_SET].map((id) => ({ id })) } }),
+    probeDisabled: true,
+    allowedModels: ['muse-spark-1.3-contributor-free'],
+    probeImpl: async (model) => {
+      probed.push(model)
+      return 'pass'
+    },
+  })
+  try {
+    await catalog.refreshOnce()
+    await catalog.probeOnce()
+    assert.deepEqual(probed, ['muse-spark-1.3-contributor-free'], 'a non-whitelisted id never spends anonymous-lane quota on a probe')
+    assert.deepEqual(catalog.probeVerdicts(), { 'muse-spark-1.3-contributor-free': 'pass' })
+    assert.deepEqual(catalog.list(), ['muse-spark-1.3-contributor-free'])
+  } finally {
+    catalog.stop()
+  }
+})

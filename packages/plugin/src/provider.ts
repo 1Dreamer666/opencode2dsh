@@ -57,9 +57,10 @@ export async function removeProviderRoute(
  * One namespace's resolved value, from whichever read face the host offers.
  * 0.1.7's `describe()` is preferred: it is the canonical face and the only one
  * a 0.1.7 host has, and preferring it means a reduced composition that still
- * carries a vestigial `get` is never routed through it.
+ * carries a vestigial `get` is never routed through it. Shared with index.ts's
+ * best-effort default-model read (issue #83's startup warn).
  */
-function readNamespace(settings: DshSeams['settings'], ns: string): unknown {
+export function readNamespace(settings: DshSeams['settings'], ns: string): unknown {
   if (typeof settings.describe === 'function') {
     const descriptors = settings.describe()
     if (Array.isArray(descriptors)) {

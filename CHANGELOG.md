@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Optional `allowedModels` config — a model whitelist for what DSH shows and serves (#83). Exact-match model ids; omitted or empty keeps today's behavior (every eligible free-lane model is exposed). When set, the picker shows `allowedModels ∩` the currently eligible free models, the serving gate denies a direct call to a non-whitelisted id with the distinct `not_in_whitelisted` source, and zen-adapter's `prepareCall`/`stream` fail fast with a tagged "not in allowedModels" error BEFORE any network traffic — only the whitelist gates serving; probe-pending/blocklisted ids keep today's serving behavior. The adaptive probe skips non-whitelisted ids (they can never be exposed, so their anonymous-lane quota is not spent). The whitelist only narrows: paid/deprecated/local-blocklist/probe verdicts stay authoritative, so a whitelisted id that is currently probe-refused remains hidden. If the whitelist excludes the host's configured default model, one startup warn names it (advisory only — no crash, no config rewrite).
+
 ## 0.3.13 (2026-10-19)
 
 ### Added
