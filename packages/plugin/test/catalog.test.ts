@@ -553,7 +553,7 @@ test('the deepseek-v4.1 free lane keeps its full context window (issue #81)', as
   // other declared field alone.
   const catalog = new ModelCatalog({
     fetchImpl: fakeFetch({
-      'https://opencode.ai/zen/v1/models': { data: [{ id: 'deepseek-v4.1-flash-free' }] },
+      [ZEN_MODELS_URL]: { data: [{ id: 'deepseek-v4.1-flash-free' }] },
       'https://models.dev/api.json': {
         opencode: {
           models: {
@@ -577,7 +577,7 @@ test('the deepseek-v4.1 free lane keeps its full context window (issue #81)', as
     // them, the feed still speaks unchanged (no blanket widening)
     const control = new ModelCatalog({
       fetchImpl: fakeFetch({
-        'https://opencode.ai/zen/v1/models': { data: [{ id: 'glm-5.3-flash-free' }] },
+        [ZEN_MODELS_URL]: { data: [{ id: 'glm-5.3-flash-free' }] },
         'https://models.dev/api.json': {
           opencode: { models: { 'glm-5.3-flash-free': { cost: { input: 0, output: 0 }, limit: { context: 200000, output: 32000 } } } },
         },
