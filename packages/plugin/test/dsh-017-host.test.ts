@@ -14,7 +14,7 @@
 import { test, mock } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { apply, inject, Config, type PluginContext } from '../src/index.ts'
+import { apply, hostDefaultModelId, inject, Config, warnHiddenDefaultModel, type PluginContext } from '../src/index.ts'
 import { resolveIpPoolSettings, type AnyIpPoolSection, type IpPoolSettings, type VolatileRef } from '../src/ip-pool-settings/namespace.ts'
 import { ModelCatalog } from '../src/adapter/catalog.ts'
 
@@ -231,4 +231,57 @@ test('an inject that never fires its callback does not block the route', async (
   apply(h.base, { ...Config({ mode: 'adapter' }), ipPool: h.ipPool })
   await settle()
   assert.deepEqual(h.registrations, [['opencode2dsh']])
+})
+
+// ---------------------------------------------------------------------------
+// Issue #83: one startup warn when the whitelist hides the host default model
+// ---------------------------------------------------------------------------
+
+test('a whitelist that hides the host default model warns exactly once (issue #83)', async () => {
+  const warnings: string[] = []
+  const h = host()
+  const s = settings17()
+  s.namespaces.push({ ns: 'llm', value: { defaultModel: 'opencode2dsh/mimo-v2.6-flash-free' } })
+  h.base.logger = { info() {}, warn(...args: unknown[]) { warnings.push(String(args[0])) }, error() {} }
+  h.base.settings = s.service
+
+  apply(h.base, { ...Config({ mode: 'adapter', allowedModels: ['big-pickle'] }), ipPool: h.ipPool })
+  await settle()
+  // scoped to the whitelist warn: this fixture's poisonous settings.get also
+  // trips the pre-existing stale-route sweep warn, which is not under test
+  const whitelistWarns = warnings.filter((m) => m.includes('allowedModels'))
+  assert.equal(whitelistWarns.length, 1, 'exactly one startup warn')
+  assert.ok(whitelistWarns[0]!.includes('opencode2dsh/mimo-v2.6-flash-free'), 'the warn names the model')
+  assert.ok(whitelistWarns[0]!.includes('not in allowedModels'), 'the warn states the reason')
+})
+
+test('the #83 default-model warn stays silent unless the whitelist actually hides our default', async () => {
+  const warnings: string[] = []
+  const logger = { info() {}, warn(...args: unknown[]) { warnings.push(String(args[0])) }, error() {} }
+  const llm = { defaultModel: 'opencode2dsh/mimo-v2.6-flash-free' }
+  const settings = () => ({
+    describe: () => [{ ns: 'llm', value: llm }],
+  } as never)
+
+  // no whitelist -> nothing is hidden
+  warnHiddenDefaultModel(settings(), undefined, logger)
+  warnHiddenDefaultModel(settings(), [], logger)
+  // the default is whitelisted -> offered, no warn
+  warnHiddenDefaultModel(settings(), ['mimo-v2.6-flash-free'], logger)
+  // another provider's default can never trip it
+  const other = { describe: () => [{ ns: 'llm', value: { defaultModel: 'deepseek/deepseek-chat' } }] }
+  warnHiddenDefaultModel(other as never, ['big-pickle'], logger)
+  assert.deepEqual(warnings, [])
+
+  // unrecognized host shapes read as unknown and stay silent
+  assert.equal(hostDefaultModelId({ describe: () => [] } as never), undefined, 'no llm namespace')
+  assert.equal(hostDefaultModelId({ describe: () => [{ ns: 'llm', value: { model: 42 } }] } as never), undefined, 'non-string field')
+  assert.equal(hostDefaultModelId({ describe: () => [{ ns: 'llm', value: 'weird' }] } as never), undefined, 'non-object namespace')
+  // legacy 0.1.1 hosts answer through get(ns) instead
+  assert.equal(
+    hostDefaultModelId({ get: (ns: string) => (ns === 'llm' ? { defaultModel: 'opencode2dsh/a-free' } : undefined) } as never),
+    'opencode2dsh/a-free',
+    'the get() fallback still answers',
+  )
+  assert.deepEqual(warnings, [])
 })

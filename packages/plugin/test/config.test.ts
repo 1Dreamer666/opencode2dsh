@@ -96,6 +96,22 @@ test('Config declares and bounds the stream watchdog windows, undefined when uns
   assert.equal(resolveConfig().firstEventMs, undefined)
 })
 
+test('Config declares the allowedModels whitelist, empty by default (issue #83)', () => {
+  // Absent = empty = expose-all: the whitelist is a narrowing pass over the
+  // existing catalog rules, never an override (see the catalog tests).
+  assert.deepEqual(Config({}).allowedModels, [])
+  // The issue's yaml example shape round-trips as a plain string array.
+  const issue = ['deepseek-v4.1-flash-free', 'mimo-v2.6-flash-free', 'glm-5.3-flash-free', 'nemotron-3.5-super-vl-free']
+  const config = Config({ allowedModels: issue })
+  assert.deepEqual(JSON.parse(JSON.stringify(config.allowedModels)), issue)
+  // A non-array is rejected rather than armed.
+  assert.throws(() => Config({ allowedModels: 'big-pickle' } as never))
+  // resolveConfig passes the list through untouched; a raw (schema-less)
+  // config simply has no key at all.
+  assert.deepEqual(resolveConfig({ allowedModels: issue }).allowedModels, issue)
+  assert.equal(resolveConfig().allowedModels, undefined)
+})
+
 test('Config declares the delegation block, disabled by default, with per-field bounds', () => {
   // issue #76: the delegation block must be reachable and validated like every
   // other config field. Schemastery instantiates the nested object even when
