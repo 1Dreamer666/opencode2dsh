@@ -1,4 +1,4 @@
-import { createProvider, type Api, type Context, type Model } from '@earendil-works/pi-ai'
+import { createModels, createProvider, type Api, type Context, type Model } from '@earendil-works/pi-ai'
 import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions'
 import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses'
 
@@ -301,10 +301,46 @@ function siblingZenBaseUrl(baseUrl: string): string | null {
   return candidate === `${trimmed}/v1` ? null : candidate
 }
 
+/**
+ * The stream surface the adapter needs from a transport. Both a raw pi-ai
+ * provider and its Models wrapper satisfy this structurally; the adapter's
+ * unit tests inject a scripted object through the same seam (providerOverride).
+ */
+interface StreamTransport {
+  streamSimple(model: unknown, context: unknown, options: unknown): unknown
+}
+
+/**
+ * Wrap a freshly built pi-ai provider in the Models entry point (#77).
+ *
+ * pi-ai 0.86.0 narrowed the provider-facing API to a normalized
+ * TranscriptContext: tool declarations now ride the leading system message's
+ * `toolsAdded` field, and `context.tools` is folded into it ONLY by the
+ * Models entry points (0.87.1 dist/models.js:393 `streamSimple` ->
+ * `normalizeContext`; dist/utils/transcript.js:23-27,195-203). A DSH profile
+ * (`nodeLinker: hoisted`) resolves ONE pi-ai copy for the whole profile —
+ * 0.87.1 today — so the adapter's raw `provider.streamSimple(model, context)`
+ * call silently dropped every host tool: the wire carried only the injected
+ * free-lane gate stubs, with `tool_choice: "none"` as the tell.
+ *
+ * On 0.82.x the Models wrapper is a pass-through — `streamSimple` hands the
+ * context to the provider untouched (0.82.1 dist/models.js:273-279) and the
+ * transport reads `context.tools` itself (0.82.1
+ * dist/api/openai-completions.js:543-545). Routing through Models is
+ * therefore the one code path that preserves host tools on BOTH resolutions.
+ * Narrowing our semver range could not help: the hoisted copy is decided by
+ * the whole profile, not by this plugin (#40).
+ */
+function modelsTransport(provider: unknown): StreamTransport {
+  const models = createModels()
+  models.setProvider(provider as never)
+  return models as unknown as StreamTransport
+}
+
 export class ZenAdapter {
   readonly #catalog: CatalogLike
-  readonly #provider: { streamSimple(model: unknown, context: unknown, options: unknown): unknown }
-  readonly #responsesProvider: { streamSimple(model: unknown, context: unknown, options: unknown): unknown } | null
+  readonly #provider: StreamTransport
+  readonly #responsesProvider: StreamTransport | null
   readonly #firstEventMs: number
   readonly #bodyIdleMs: number
   readonly #responsesBodyIdleMs: number
@@ -337,22 +373,22 @@ export class ZenAdapter {
         resolve: async () => ({ auth: { apiKey: ANONYMOUS_KEY } }),
       },
     }
-    this.#provider = createProvider<Api>({
+    this.#provider = modelsTransport(createProvider<Api>({
       id: PROVIDER_ID,
       name: PROVIDER_ID,
       baseUrl,
       auth,
       models: [],
       api: openaiCompletions,
-    })
-    this.#responsesProvider = createProvider<Api>({
+    }))
+    this.#responsesProvider = modelsTransport(createProvider<Api>({
       id: PROVIDER_ID,
       name: PROVIDER_ID,
       baseUrl,
       auth,
       models: [],
       api: openaiResponses,
-    })
+    }))
   }
 
   providerInfo(provider: string): { id: string; name: string } {
@@ -735,11 +771,14 @@ export class ZenAdapter {
     const effortWire = isResponses ? undefined : reasoningEffortWire(options.reasoningEffort)
 
     // onPayload injects the free-lane gate tools (adapter/messages.ts) into the
-    // serialized body right before dispatch — plain-chat contexts carry no
-    // tools and the anonymous lane 403s every body without bash+read. The same
-    // seam carries the selected reasoning effort: pi-ai has no option with the
-    // wire semantics this lane needs (selected off must SEND `none`, not omit),
-    // so the effort rides the payload rewrite instead.
+    // serialized body right before dispatch: the anonymous lane 403s a body
+    // without the bash+read agent shape, and a host that passes no tools must
+    // not leave the injected stubs callable. Host tools now arrive via the
+    // context (folded into the transcript by the Models wrapper, #77) and the
+    // shaper appends only the gate names the body is missing. The same seam
+    // carries the selected reasoning effort: pi-ai has no option with the wire
+    // semantics this lane needs (selected off must SEND `none`, not omit), so
+    // the effort rides the payload rewrite instead.
     const onPayload =
       isResponses
         ? (payload: unknown): unknown => {
@@ -762,10 +801,12 @@ export class ZenAdapter {
       ? { ...model, baseUrl: this.#siblingBaseUrl }
       : model
     // Responses-only models (muse-spark-*) must hit /responses, not /chat/completions.
-    const provider = isResponsesModel(model.id) && this.#responsesProvider
+    // Each branch is the Models-wrapped transport (#77); unit tests inject a
+    // scripted raw provider through the same override seam.
+    const transport = isResponsesModel(model.id) && this.#responsesProvider
       ? this.#responsesProvider
       : this.#provider
-    return provider.streamSimple(requestModel, context as unknown as Context, {
+    return transport.streamSimple(requestModel, context as unknown as Context, {
       apiKey: ANONYMOUS_KEY,
       sessionId: ids.session,
       headers: disguiseHeaders(ids),
