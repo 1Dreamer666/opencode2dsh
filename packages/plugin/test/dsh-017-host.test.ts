@@ -271,6 +271,9 @@ test('the #83 default-model warn stays silent unless the whitelist actually hide
   // another provider's default can never trip it
   const other = { describe: () => [{ ns: 'llm', value: { defaultModel: 'deepseek/deepseek-chat' } }] }
   warnHiddenDefaultModel(other as never, ['big-pickle'], logger)
+  // a degenerate ref ("opencode2dsh/") names no model and stays silent
+  const blank = { describe: () => [{ ns: 'llm', value: { defaultModel: 'opencode2dsh/' } }] }
+  warnHiddenDefaultModel(blank as never, ['big-pickle'], logger)
   assert.deepEqual(warnings, [])
 
   // unrecognized host shapes read as unknown and stay silent

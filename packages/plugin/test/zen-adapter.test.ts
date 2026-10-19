@@ -551,3 +551,78 @@ test('the tool-name alias seam passes through names unchanged on the shipped rec
   assert.ok(names.length > 0)
   assert.ok(names.every((name) => name === 'bash'), 'names pass through: ' + JSON.stringify(names))
 })
+
+// ---------------------------------------------------------------------------
+// Issue #83: the whitelist gates the SERVING path, not just the picker
+// ---------------------------------------------------------------------------
+
+test('a direct call to a non-whitelisted id fails fast on both seams, before any wire traffic (issue #83)', async () => {
+  let wireCalls = 0
+  const provider = {
+    streamSimple(): AsyncIterable<{ type: string }> {
+      wireCalls += 1
+      return (async function* () {
+        yield { type: 'start' }
+        yield { type: 'done', message: { stopReason: 'stop', content: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }
+      })()
+    },
+  }
+  const adapter = new ZenAdapter(
+    {
+      list: () => ['big-pickle'],
+      decision: () => ({ allowed: false, source: 'not_in_whitelisted', known: true }),
+      reasoningCapability: () => undefined,
+      whitelistAllows: (model) => model === 'big-pickle',
+    },
+    { providerOverride: provider },
+  )
+  // prepareCall rejects with the tagged, actionable error
+  await assert.rejects(adapter.prepareCall('opencode2dsh', 'space-bunny-free'), /space-bunny-free.*not in allowedModels/)
+  // stream rejects on its first pull with the same error
+  await assert.rejects(async () => {
+    for await (const chunk of adapter.stream({ provider: 'opencode2dsh', model: 'space-bunny-free', messages: [] })) void chunk
+  }, /space-bunny-free.*not in allowedModels/)
+  // and the gate sits BEFORE the wire: the transport never saw the request,
+  // so an excluded model cannot spend anonymous-lane quota
+  assert.equal(wireCalls, 0)
+})
+
+test('the #83 serving gate is open for whitelisted ids, empty whitelists, and pre-#83 catalogs', async () => {
+  const okProvider = {
+    streamSimple(): AsyncIterable<{ type: string }> {
+      return (async function* () {
+        yield { type: 'start' }
+        yield { type: 'done', message: { stopReason: 'stop', content: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }
+      })()
+    },
+  }
+  const fake = (whitelistAllows?: (model: string) => boolean) => ({
+    list: () => ['big-pickle'],
+    decision: () => ({ allowed: true, source: 'test', known: true }),
+    reasoningCapability: () => undefined,
+    ...(whitelistAllows ? { whitelistAllows } : {}),
+  })
+  const options = { providerOverride: okProvider }
+
+  // a whitelisted id passes the gate and reaches the wire
+  const gated = new ZenAdapter(fake((model) => model === 'big-pickle'), options)
+  await assert.doesNotReject(gated.prepareCall('opencode2dsh', 'big-pickle'))
+  for await (const chunk of gated.stream({ provider: 'opencode2dsh', model: 'big-pickle', messages: [] })) void chunk
+
+  // an empty/omitted whitelist is no gate at all
+  const unrestricted = new ZenAdapter(fake(() => true), options)
+  await assert.doesNotReject(unrestricted.prepareCall('opencode2dsh', 'anything-free'))
+  const legacy = new ZenAdapter(fake(), options) // no whitelistAllows member
+  await assert.doesNotReject(legacy.prepareCall('opencode2dsh', 'anything-free'))
+
+  // end to end over a real ModelCatalog: the excluded id rejects, the
+  // whitelisted one passes — and only the WHITELIST gates serving (a
+  // probe-pending/blocklisted id still reaches the wire, unchanged)
+  const catalog = new ModelCatalog({ allowedModels: ['big-pickle'] })
+  const real = new ZenAdapter(catalog, options)
+  await assert.rejects(real.prepareCall('opencode2dsh', 'mimo-v2.6-flash-free'), /not in allowedModels/)
+  await assert.doesNotReject(real.prepareCall('opencode2dsh', 'big-pickle'))
+  const open = new ZenAdapter(new ModelCatalog({ allowedModels: [] }), options)
+  await assert.doesNotReject(open.prepareCall('opencode2dsh', 'mimo-v2.6-flash-free'))
+  catalog.stop()
+})

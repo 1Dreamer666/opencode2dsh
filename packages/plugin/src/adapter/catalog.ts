@@ -561,6 +561,19 @@ export class ModelCatalog {
     return this.#allowedModels === null || this.#allowedModels.has(model)
   }
 
+  /**
+   * The #83 whitelist as a serving gate for the adapter: zen-adapter consults
+   * this BEFORE any wire traffic, so a direct call to an excluded id fails
+   * fast instead of spending anonymous-lane quota on a model the picker would
+   * never offer. Deliberately NOT the full decision() chain — only the
+   * whitelist gates serving; probe-pending/blocklisted ids keep today's
+   * serving behavior (the upstream answers for itself), a question the
+   * maintainer may revisit separately.
+   */
+  whitelistAllows(model: string): boolean {
+    return this.#whitelistAllows(model)
+  }
+
   /** ids exposed to DSH: S1 ∩ allowed, or S3 while the live catalog is pending. */
   list(): string[] {
     if (this.#zen.size === 0) return this.#zenFailed ? [] : staticFreeModels.filter((model) => this.decision(model).allowed)

@@ -295,7 +295,10 @@ export function warnHiddenDefaultModel(
   if (!raw) return
   const slash = raw.indexOf('/')
   if (slash <= 0 || raw.slice(0, slash) !== PROVIDER_ID) return
-  const id = raw.slice(slash + 1)
+  // degenerate refs like "opencode2dsh/" name no model — compare trimmed,
+  // like the catalog's own normalization, and stay silent on blanks
+  const id = raw.slice(slash + 1).trim()
+  if (id.length === 0) return
   if (whitelist.has(id)) return
   logger.warn(`opencode2dsh: the host's default model "${raw}" is not in allowedModels; the model picker will not offer "${id}" (issue #83)`)
 }

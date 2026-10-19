@@ -37,6 +37,13 @@ export interface CatalogLike {
   list(): string[]
   decision(model: string): { allowed: boolean; source: string; known: boolean }
   /**
+   * Optional (issue #83): the serving gate for the whitelist. prepareCall/
+   * stream consult it BEFORE any wire traffic, so a direct call to an id the
+   * whitelist excludes fails fast with a tagged error. Catalogs without the
+   * member (structural seam, tests) are unrestricted.
+   */
+  whitelistAllows?(model: string): boolean
+  /**
    * Optional: bounded wait for the first live fetch (issue #45). listModels
    * awaits it so the host's registration-time snapshot is the live roster,
    * never the bootstrap list. Catalogs without it answer immediately from
@@ -54,6 +61,17 @@ export interface CatalogLike {
 
 const DEFAULT_CONTEXT_WINDOW = 262144
 const DEFAULT_MAX_TOKENS = 32768
+
+/**
+ * The #83 serving-gate denial: a direct call to an id the user's whitelist
+ * excludes. Distinct and actionable — it names the id and the config field
+ * that controls it — and raised BEFORE any wire traffic, so an excluded model
+ * never spends anonymous-lane quota. Only the whitelist gates here: probe-
+ * pending/blocklisted ids keep today's serving behavior.
+ */
+export function notInWhitelistError(model: string): Error {
+  return new Error(`opencode2dsh: model "${model}" is not in allowedModels; add it to the plugin config (or clear the whitelist) to serve it (issue #83)`)
+}
 
 /** The advertised context window: the models.dev declaration when the
  * metadata speaks, the host default otherwise (pending/absent metadata or a
@@ -485,10 +503,17 @@ export class ZenAdapter {
     return resolved
   }
 
+  /** The #83 whitelist as a serving gate: catalogs without the member are
+   * unrestricted (the structural seam keeps legacy fakes/hosts working). */
+  #whitelistBlocks(model: string): boolean {
+    return this.#catalog.whitelistAllows?.(model) === false
+  }
+
   async prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<{
     model: ReturnType<ZenAdapter['resolveModel']>
     stream: (options: HarnessGenerateOptions) => AsyncGenerator<HarnessChunk>
   }> {
+    if (this.#whitelistBlocks(model)) throw notInWhitelistError(model)
     return {
       model: this.resolveModel(provider, model),
       stream: (options) => this.stream(options),
@@ -502,6 +527,11 @@ export class ZenAdapter {
    * blocks get fresh indices and the final usage includes both requests.
    */
   async *stream(options: HarnessGenerateOptions): AsyncGenerator<HarnessChunk> {
+    // Issue #83 serving gate: same contract as prepareCall — a direct call to
+    // an id the whitelist excludes fails fast, before any wire traffic, on
+    // BOTH seams. ONLY the whitelist gates here; probe-pending/blocklisted
+    // ids keep today's serving behavior (upstream decides).
+    if (this.#whitelistBlocks(options.model)) throw notInWhitelistError(options.model)
     const selectedEffort = options.reasoningEffort ?? options.reasoning
     const canDisableThinking = selectedEffort !== 'off' && selectedEffort !== 'none'
       && this.resolveModel(options.provider, options.model).reasoning?.efforts.some((effort) => effort.id === 'off') === true
@@ -879,11 +909,6 @@ export class ZenAdapter {
   catalogStatus(): { total: number; exposed: number } {
     const list = this.#catalog.list()
     return { total: list.length, exposed: list.length }
-  }
-
-  decisionFor(model: string): { allowed: boolean; source: string } {
-    const decision = this.#catalog.decision(model)
-    return { allowed: decision.allowed, source: decision.source }
   }
 }
 
