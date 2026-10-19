@@ -277,6 +277,18 @@ export interface CatalogOptions {
   refreshSeconds?: number
   /** Where the models.dev cache lives (agent data dir). */
   cachePath?: string
+  /**
+   * Model whitelist (issue #83): exact model ids the DSH picker may expose
+   * and the serving gate allows. Undefined or empty = no gate (every
+   * eligible free-lane model, today's behavior). A set whitelist only
+   * NARROWS: paid/deprecated/blocklist/probe verdicts stay authoritative,
+   * and non-whitelisted ids are skipped by the adaptive probe (they can
+   * never be exposed, so their quota is not spent on probing). A constructor
+   * option on purpose: ordinary config is immutable per plugin generation in
+   * DSH 0.1.7 — a change arrives as a plugin reload, which builds a fresh
+   * catalog — so there is no live-update path a setter would need to serve.
+   */
+  allowedModels?: string[]
   /** Upstream override for tests. */
   zenBaseUrl?: string
   /** models.dev override for tests. */
@@ -299,6 +311,21 @@ const METADATA_REFRESH_MS = 24 * 60 * 60 * 1000
 const FETCH_TIMEOUT_MS = 30_000
 
 /**
+ * Normalize the #83 whitelist: trim and dedupe ids, drop blanks; undefined,
+ * an empty list, or only blanks = `null` = no gate. Every consumer (the
+ * decision tail, the probe skip, the startup warn) reads through this, so
+ * "empty means everything" has one source of truth.
+ */
+export function normalizeAllowedModels(ids: unknown): ReadonlySet<string> | null {
+  if (!Array.isArray(ids)) return null
+  const set = new Set<string>()
+  for (const id of ids) {
+    if (typeof id === 'string' && id.trim().length > 0) set.add(id.trim())
+  }
+  return set.size > 0 ? set : null
+}
+
+/**
  * Live model directory with the S1/S2/S3 fallback chain and the timer-driven
  * refresh loop. All state is in-memory; only the models.dev cache persists.
  *
@@ -307,6 +334,8 @@ const FETCH_TIMEOUT_MS = 30_000
  *      "free" name never overrides a negative metadata verdict
  *   2. metadata cannot speak (pending/missing) — name fallback, or the
  *      compile-time verified S3 list for known-good ids
+ *   3. the issue #83 allowedModels whitelist — narrowing only and always
+ *      last, so every catalog rule above stays authoritative
  */
 export class ModelCatalog {
   #zen: Set<string> = new Set()
@@ -317,6 +346,8 @@ export class ModelCatalog {
   #zenFailed = false
   #refreshSeconds: number
   #cachePath?: string
+  /** #83 whitelist, normalized; null = unrestricted. */
+  #allowedModels: ReadonlySet<string> | null
   #zenBaseUrl: string
   #metadataUrl: string
   #fetch: typeof fetch
@@ -338,6 +369,7 @@ export class ModelCatalog {
   constructor(options: CatalogOptions = {}) {
     this.#refreshSeconds = options.refreshSeconds ?? 300
     this.#cachePath = options.cachePath
+    this.#allowedModels = normalizeAllowedModels(options.allowedModels)
     this.#zenBaseUrl = options.zenBaseUrl ?? ZEN_BASE_URL
     this.#metadataUrl = options.metadataUrl ?? 'https://models.dev/api.json'
     this.#fetch = options.fetchImpl ?? fetch
@@ -505,13 +537,28 @@ export class ModelCatalog {
     // against the live lane, so an S3 id stays vouched even when stale
     // metadata claims deprecation (hy3-free case: works after models.dev
     // flags it, dies only when it leaves the Zen catalog).
-    if (!metadata.allowed && metadata.source === 'metadata_deprecated' && staticFreeModels.includes(model)) {
-      return { allowed: true, source: 'static_verified', known: false }
+    let verdict = metadata
+    if (!metadata.allowed && (metadata.source === 'metadata_deprecated' || !metadata.known) && staticFreeModels.includes(model)) {
+      verdict = { allowed: true, source: 'static_verified', known: false }
     }
-    if (!metadata.allowed && !metadata.known && staticFreeModels.includes(model)) {
-      return { allowed: true, source: 'static_verified', known: false }
+    // Issue #83: the user's allowedModels whitelist sits at the very END of
+    // the chain and only NARROWS. Every verdict above stays authoritative — a
+    // whitelisted id that is paid/deprecated/blocklisted/probe-refused keeps
+    // its real denial source — while an otherwise-exposed id the whitelist
+    // omits gets a distinct, actionable denial (`not_in_whitelisted`) instead
+    // of silently vanishing into the metadata vocabulary. list() and the
+    // bootstrap path both filter through this decision, so one gate covers
+    // picker exposure and direct calls alike. Unset/empty = no gate at all.
+    if (verdict.allowed && !this.#whitelistAllows(model)) {
+      return { allowed: false, source: 'not_in_whitelisted', known: true }
     }
-    return metadata
+    return verdict
+  }
+
+  /** The #83 gate: an unset/empty whitelist allows everything, a set one is
+   * exact-match by model id. */
+  #whitelistAllows(model: string): boolean {
+    return this.#allowedModels === null || this.#allowedModels.has(model)
   }
 
   /** ids exposed to DSH: S1 ∩ allowed, or S3 while the live catalog is pending. */
@@ -546,7 +593,10 @@ export class ModelCatalog {
       this.#probeTimer = setTimeout(() => void this.probeOnce(), this.#probeIntervalMs)
       this.#probeTimer.unref?.()
     }
-    const ids = [...FREE_LANE_PROBE_SET].filter((id) => this.#zen.has(id))
+    // Issue #83 composes here too: a non-whitelisted id can never be exposed,
+    // so probing it would only spend anonymous-lane quota on a verdict the
+    // picker can never act on. Whitelist ∩ live catalog is the probe set.
+    const ids = [...FREE_LANE_PROBE_SET].filter((id) => this.#zen.has(id) && this.#whitelistAllows(id))
     // An empty catalog (flaky network at boot) must NOT end the probe chain:
     // keep the round timer alive so a later catalog fill still gets probed —
     // the flaky-VPN boot is exactly the host this probe exists for.

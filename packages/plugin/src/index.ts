@@ -3,14 +3,14 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 
-import { ModelCatalog, defaultCachePath, type CatalogSnapshot } from './adapter/catalog.ts'
+import { ModelCatalog, defaultCachePath, normalizeAllowedModels, type CatalogSnapshot } from './adapter/catalog.ts'
 import { OpencodeDelegate, type DelegationDelegate } from './adapter/delegate.ts'
 import { ZenAdapter, PROVIDER_ID } from './adapter/zen-adapter.ts'
 import { AgentProcess, type ReadyInfo } from './agent-process.ts'
 import { Config, configPaths, ensureToken, ordinaryConfig, resolveConfig, writeAgentConfig, type DelegationConfig, type Opencode2dshConfig, type ResolvedPluginConfig } from './config.ts'
 import { applyIpPoolSettings } from './ip-pool-settings/apply.ts'
 import { readVolatile, type IpPoolSettings } from './ip-pool-settings/namespace.ts'
-import { fetchHealth, fetchModels, registerProvider, removeProviderRoute } from './provider.ts'
+import { fetchHealth, fetchModels, readNamespace, registerProvider, removeProviderRoute } from './provider.ts'
 
 /**
  * opencode2dsh DSH cordis plugin entry.
@@ -138,6 +138,7 @@ function applyAdapter(
   const catalog = new ModelCatalog({
     refreshSeconds: cfg.refreshSeconds,
     cachePath: defaultCachePath(dataDir),
+    allowedModels: cfg.allowedModels,
     onRefresh: (status, lastError) => {
       if (disposed) return
       writeStatus(status, lastError)
@@ -216,6 +217,9 @@ function applyAdapter(
         .catch((err) => {
           logger.warn(`opencode2dsh: stale route cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
         })
+      // Issue #83: one advisory warn when the whitelist hides the model the
+      // host saved as its default — see warnHiddenDefaultModel.
+      warnHiddenDefaultModel(sctx.settings, cfg.allowedModels, logger)
     })) as unknown as Promise<unknown>
   }
 
@@ -253,6 +257,47 @@ function createDelegate(
     startTimeoutMs: delegation.startTimeoutMs,
     log: (message) => logger.info(message),
   })
+}
+
+/**
+ * The host's configured default model, best effort (issue #83's startup
+ * warn): the `llm` namespace's model field (`defaultModel`/`default`/`model`),
+ * as `provider/id`. Advisory ONLY — an unrecognized host shape (other ns,
+ * other key, bare id, non-string) reads as unknown and the caller skips the
+ * warn; this must never throw, crash, or touch host config.
+ */
+export function hostDefaultModelId(settings: NonNullable<PluginContext['settings']>): string | undefined {
+  const namespace = readNamespace(settings, 'llm')
+  if (!namespace || typeof namespace !== 'object') return undefined
+  for (const key of ['defaultModel', 'default', 'model']) {
+    const value = (namespace as Record<string, unknown>)[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
+/**
+ * One startup warn (issue #83) when allowedModels is set and excludes the
+ * model the host saved as its default: the picker will stop offering it, so
+ * say so — once, naming the id. No crash, no auto-rewrite of host config;
+ * the host keeps its selection and can fix the whitelist itself. Fires only
+ * for ids under this plugin's provider (`opencode2dsh/...`), so another
+ * provider's default can never trip it.
+ */
+export function warnHiddenDefaultModel(
+  settings: NonNullable<PluginContext['settings']>,
+  allowedModels: string[] | undefined,
+  logger: PluginContext['logger'],
+): void {
+  const whitelist = normalizeAllowedModels(allowedModels)
+  if (whitelist === null) return
+  const raw = hostDefaultModelId(settings)
+  if (!raw) return
+  const slash = raw.indexOf('/')
+  if (slash <= 0 || raw.slice(0, slash) !== PROVIDER_ID) return
+  const id = raw.slice(slash + 1)
+  if (whitelist.has(id)) return
+  logger.warn(`opencode2dsh: the host's default model "${raw}" is not in allowedModels; the model picker will not offer "${id}" (issue #83)`)
 }
 
 function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: Promise<ReadyInfo> } {

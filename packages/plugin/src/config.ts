@@ -36,6 +36,14 @@ export interface Opencode2dshConfig {
   apiKeyEnv?: string
   /** Model list refresh interval in seconds (agent refresh_seconds matches). */
   refreshSeconds?: number
+  /**
+   * Model whitelist (issue #83): exact model ids the DSH picker exposes and
+   * the serving gate allows. Omitted or empty keeps today's behavior (every
+   * eligible free-lane model). Narrowing only: a whitelisted id that is
+   * paid/deprecated/blocklisted/probe-refused stays hidden, and a direct
+   * call to a non-whitelisted id is denied with source `not_in_whitelisted`.
+   */
+  allowedModels?: string[]
   /** Restart backoff: initial delay ms. */
   restartDelayMs?: number
   /** Restart backoff: max delay ms. */
@@ -190,6 +198,14 @@ export const Config = Schema.object({
   apiKeyEnv: Schema.string().default(defaults.apiKeyEnv),
   /** Model list refresh interval in seconds. */
   refreshSeconds: Schema.number().step(1).min(1).default(defaults.refreshSeconds),
+  /**
+   * Model whitelist (issue #83), exact ids. Empty = every eligible free-lane
+   * model; a set whitelist only narrows (paid/deprecated/blocklist/probe
+   * rules still win). Ordinary config like the rest of this schema: edited in
+   * the composition patch, dropped from the settings form, applied on plugin
+   * reload.
+   */
+  allowedModels: Schema.array(Schema.string()).default([]),
   /** Restart backoff: initial delay ms. */
   restartDelayMs: Schema.number().step(1).min(0).default(defaults.restartDelayMs),
   /** Restart backoff: max delay ms. */
