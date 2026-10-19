@@ -234,8 +234,11 @@ export class PoolRoutingDispatcher implements RoutingDispatcherSurface {
    * (live repro: 10.255.255.1:9999 blackhole, seen:[] callbacks). So the
    * wrapper arms a timer at dispatch time; any handler callback disarms it,
    * and silence past the deadline counts as a transport failure (dead strike
-   * + session reroute). The sentinel never aborts the request itself — fetch
-   * and pi-ai own their own timeouts.
+   * + session reroute) — on that silence path ONLY the sentinel synthesizes
+   * the response-error the handler owes and aborts the controller (fetch
+   * rejects at once instead of hanging forever). A real onResponseError is
+   * forwarded untouched; the sentinel never injects alongside a genuine
+   * failure (#87).
    */
   #observe(exitId: string, model: string, session: string, handler: Dispatcher.DispatchHandler): Dispatcher.DispatchHandler {
     const pool = this.#pool
