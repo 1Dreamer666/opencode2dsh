@@ -518,7 +518,8 @@ POST {zen}/v1/chat/completions
 | probeMaxPerRound | 20 | 周期探活单轮复探上限（每探一个都烧匿名通道配额，470 个订阅出口不能一轮打光） |
 | limitedCooldownBase | 60s | 首次 429 冷却 |
 | limitedCooldownMax | 30min | 指数退避上限 |
-| deadRetryMs | 2min | dead 出口重新探测间隔 |
+| deadRetryMs | 30min | dead 出口重新探测间隔（从被打死一刻起算，`markDeadStrike` 记录死亡时间戳） |
+| avoidMs | 30s | avoid 名单（旋转失败 backoff）有效期 |
 | modelBanConfirmations | 2 | suspect → banned 确认次数（防瞬时抖动误杀） |
 | maxRotateAttempts | 3 | 单请求换出口上限（§3.4） |
 | poolTargetSize | 20 | 免费池目标容量（§3.5） |

@@ -200,3 +200,34 @@ test('PeriodicProber: stop() prevents further rounds', async () => {
   await prober.tick()
   assert.deepEqual(queued, [])
 })
+
+test('PeriodicProber: start() after stop() revives the loop (the settings toggle regression)', async () => {
+  // applyConfig stops the prober on disable and starts it on re-enable; the
+  // old latch made the second start() a no-op for the process lifetime.
+  const p = pool()
+  p.add(node({ id: 'n-0', source: 'free', exitIP: '10.0.0.1', latencyMs: 0 }))
+  const queued: string[] = []
+  const prober = new PeriodicProber(p, async (id) => { queued.push(id) }, { now, intervalMs: 25 })
+  prober.start()
+  prober.stop()
+  prober.start() // the disable -> enable cycle from the settings page
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  prober.stop()
+  assert.ok(queued.length > 0, 'the revived prober ticks again after stop -> start')
+})
+
+test('PeriodicProber.select: cooled/never-probed beat dead-retries when the round is capped', () => {
+  // Priority (docs §4.3): re-measuring live-but-degraded exits comes before
+  // dead retries; with >= maxPerRound dead exits an insertion-order pass
+  // starved the live classes every round.
+  const p = pool()
+  for (let i = 0; i < 4; i += 1) {
+    p.add(node({ id: `dead:${i}`, source: 'subscription', exitIP: `1.1.1.${i}`, latencyMs: 0 }))
+    p.markDead(`dead:${i}`)
+  }
+  p.add(node({ id: 'never:0', source: 'subscription', exitIP: '9.9.9.9', latencyMs: 0 }))
+  const prober = new PeriodicProber(p, async () => {}, { now, maxPerRound: 3 })
+  const reasons = prober.select().map((c) => c.reason)
+  assert.ok(reasons.includes('never-probed'), 'a live unmeasured exit is not starved by dead retries')
+  assert.equal(reasons.filter((r) => r === 'dead-retry').length <= 2, true)
+})

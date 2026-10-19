@@ -380,6 +380,12 @@ export class ExitPool {
     health.inflight = false
     health.deadStrikes += 1
     health.lastProbeFailure = 'transport'
+    // Stamp the death: the §4.6 deadRetryMs gate and the refresh staleness
+    // window both measure from lastProbedAt, and without a stamp they read
+    // the last SUCCESS — an exit healthy for >30min that dies is instantly
+    // "due" and re-probed every round (the quota burn the gate exists to
+    // prevent).
+    health.lastProbedAt = this.#now()
     if (reason !== '') health.lastProbeReason = reason
     if (node.source === 'free' && health.deadStrikes >= this.#deadEvictions) {
       this.remove(id)

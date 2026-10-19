@@ -91,7 +91,12 @@ export class PeriodicProber {
   }
 
   start(): void {
-    if (this.#timer !== null || this.#stopped) return
+    // Clear the stop() latch: applyConfig toggles stop()/start() on every
+    // settings disable->enable cycle, and a latch that never resets would
+    // leave the prober dead for the rest of the process lifetime (unlike
+    // the fetcher/refill, this object is created once and reused).
+    this.#stopped = false
+    if (this.#timer !== null) return
     this.#timer = setInterval(() => void this.tick(), this.#intervalMs)
     this.#timer.unref?.()
   }
@@ -109,7 +114,6 @@ export class PeriodicProber {
    * state, so the selection is unit-testable without timers.
    */
   select(now = this.#now()): ProbeCandidate[] {
-    const out: ProbeCandidate[] = []
     // A dead retry only earns its quota once the exit has actually been given
     // time to come back. Measured live (2026-10-15) on a pool of 559 dead
     // subscription exits: without a gate the prober re-probed the SAME first 20
@@ -124,6 +128,15 @@ export class PeriodicProber {
     // gate, spaces each exit's retries out instead of hammering the same head
     // of the list.
     const retryable = this.#selectableDeadRetries(now)
+    // Priority buckets (docs §4.3): re-measuring live-but-degraded exits
+    // comes before dead retries — with a large dead population an
+    // insertion-order pass starves the cooled/never-probed classes every
+    // round, and a subscription node is disable-only (§3.5), so a starved
+    // exit has no other route back.
+    const cooled: ProbeCandidate[] = []
+    const neverProbed: ProbeCandidate[] = []
+    const stale: ProbeCandidate[] = []
+    const deadRetry: ProbeCandidate[] = []
     for (const entry of this.#pool.list()) {
       const health = entry.health
       // A probe already in flight for this exit owns it (per-exit serial, §4.1).
@@ -132,25 +145,25 @@ export class PeriodicProber {
         // dead retry (docs §4.6 deadRetryMs): dead exits get another chance;
         // manual/subscription ones are disable-only and would otherwise never
         // come back.
-        if (retryable.has(entry.id)) out.push({ id: entry.id, reason: 'dead-retry' })
+        if (retryable.has(entry.id)) deadRetry.push({ id: entry.id, reason: 'dead-retry' })
         continue
       }
       if (health.cooldownUntil > now) continue // still cooling: probing now wastes quota
       if (health.cooldownUntil !== 0) {
         // cooldown just expired -> re-measure instead of trusting stale facts
-        out.push({ id: entry.id, reason: 'cooled' })
+        cooled.push({ id: entry.id, reason: 'cooled' })
         continue
       }
       if (health.state === 'unknown' || entry.latencyMs <= 0) {
-        out.push({ id: entry.id, reason: 'never-probed' })
+        neverProbed.push({ id: entry.id, reason: 'never-probed' })
         continue
       }
       const banSuspect = entry.bans.some((b) => b.ban.state === 'suspect')
       if (banSuspect) {
-        out.push({ id: entry.id, reason: 'stale' })
+        stale.push({ id: entry.id, reason: 'stale' })
       }
     }
-    return out.slice(0, this.#maxPerRound)
+    return [...cooled, ...neverProbed, ...stale, ...deadRetry].slice(0, this.#maxPerRound)
   }
 
   /**

@@ -221,6 +221,12 @@ export async function startIpPool(
             logger.info('opencode2dsh: first subscription exits admitted — exit routing engaged')
           }
         }
+        // Same lifecycle hole as the free-source hook below: for a
+        // subscription-only pool the table starts empty, so the start() at
+        // creation was skipped and this hook is the first moment exits
+        // exist — the periodic prober (dead-retry recovery, §4.3) must
+        // start with them (start() is idempotent).
+        if (periodicRef !== null && config.ipPool?.enabled !== false) periodicRef.start()
       })
     }
     subscriptions.setUrls(urls)
