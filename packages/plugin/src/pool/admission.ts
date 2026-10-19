@@ -102,12 +102,13 @@ function classifyUpstreamStatus(statusCode: number): ProbeFailure {
 export async function coarseScreen(
   deps: Pick<AdmissionDeps, 'undici' | 'ipEchoUrl' | 'blockedCountries' | 'logger'>,
   candidate: { address: string; protocol: ExitProtocol },
-  options: { relaxed?: boolean; pinned?: boolean; timeoutMs?: number } = {},
+  options: { relaxed?: boolean; pinned?: boolean; timeoutMs?: number; now?: () => number } = {},
 ): Promise<EchoFacts | { rejected: string; failure?: ProbeFailure }> {
   const ipEcho = deps.ipEchoUrl ?? DEFAULT_IP_ECHO
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const blocked = new Set(deps.blockedCountries ?? ['CN'])
   const maxResponseMs = options.relaxed ? RELAXED_RESPONSE_MS : 3_000
+  const now = options.now ?? Date.now
 
   let agent: Dispatcher | null = null
   try {
@@ -122,13 +123,13 @@ export async function coarseScreen(
     return { rejected: `agent-build: ${err instanceof Error ? err.message : String(err)}`, failure: 'malformed' }
   }
   try {
-    const started = Date.now()
+    const started = now()
     const echo = await withTimeout(
       deps.undici.request(ipEcho, { dispatcher: agent }),
       timeout,
       'probe',
     )
-    const latencyMs = Date.now() - started
+    const latencyMs = now() - started
     if (echo.statusCode !== 200) {
       return { rejected: `echo HTTP ${echo.statusCode}`, failure: classifyEchoStatus(echo.statusCode) }
     }
@@ -271,11 +272,14 @@ export async function admitCandidate(
     timeoutMs?: number
     /** Pre-screened echo facts (coarseScreen output): skips steps 1-2. */
     echoFacts?: EchoFacts
+    /** Clock seam for the latency measurement (tests); default Date.now. */
+    now?: () => number
   } = {},
 ): Promise<AdmissionResult> {
   const zenBase = deps.zenBaseUrl ?? ZEN_BASE_URL
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const smokeModel = deps.smokeModel ?? 'big-pickle'
+  const now = options.now ?? Date.now
   // Live-observed 2026-09-09: zen now REJECTS anonymous-lane chat without
   // the CLI session headers (400 MissingSessionID "can only be used in
   // OpenCode") — the smoke request must carry the same disguise set the

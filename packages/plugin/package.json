@@ -101,6 +101,7 @@
     "lightningcss-wasm": "^1.33.0",
     "react": "^18.3.1",
     "tsdown": "^0.15.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@opencode2dsh/pi-ai-0.87": "npm:@earendil-works/pi-ai@0.87.1"
   }
 }

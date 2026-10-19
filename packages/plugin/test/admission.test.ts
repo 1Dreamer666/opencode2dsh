@@ -71,12 +71,18 @@ function deps(transport: ReturnType<typeof fakeTransport>) {
 
 test('admission: the four-step happy path admits with exit facts and grade', async () => {
   const transport = fakeTransport(okScript())
-  const result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' })
+  // A stepped clock makes the latency measurement deterministic: a real-clock
+  // round trip through the fake transport graded 'S' only when the event loop
+  // happened to be idle, and dropped to 'C' under load (observed flake).
+  let tick = 0
+  const now = () => { tick += 120; return tick }
+  const result = await admitCandidate(deps(transport), { address: 'h:1', protocol: 'http', source: 'free' }, { now })
   assert.ok(result.admitted, result.reason)
   assert.equal(result.node?.exitIP, '5.5.5.5')
   assert.equal(result.node?.exitLocation, 'US city')
   assert.equal(result.node?.source, 'free')
-  assert.equal(result.node?.quality, 'S') // latency ~0
+  assert.equal(result.node?.latencyMs, 120)
+  assert.equal(result.node?.quality, 'S') // 120ms is inside the S bucket
   // exactly the three scripted requests, in chain order
   assert.deepEqual(transport.calls, [ECHO_URL, MODELS_URL, CHAT_URL])
   // the proxy agent targeted the candidate
