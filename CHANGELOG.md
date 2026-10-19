@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Blocklisted free models are re-verified from this host's own exit by an adaptive probe (#84). The probe set is the issue #56 blocklist minus the never-serve protocol id (`jev-1.13-free`): `exo-free`, `ling-3.0-flash-fin-free`, `muse-spark-1.2/1.3-contributor-free`. A 1-token request on the model's real lane (Responses for muse, chat for the rest) decides per boot whether the id is exposed again, with a 30-minute retry; refused or still-pending ids stay hidden, so #56's conservative default holds until this egress proves otherwise (#82).
+
 ### Fixed
 
 - Free-lane chats no longer end on a transient `403 FreeTierError`. The lane refuses a request shape it accepted minutes earlier, so an attempt refused before any content is replayed once on the sibling host (`/inference` <-> `/zen`), inside the existing rotation cap. pi-ai takes the request URL from the model rather than the provider (`dist/api/openai-completions.js`: `baseURL: model.baseUrl`), so the replay swaps the model's base URL; a second provider moves nothing.
