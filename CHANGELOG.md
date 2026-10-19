@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Blocklisted free models are re-verified from this host's own exit by an adaptive probe (#84). The probe set is the issue #56 blocklist minus the never-serve protocol id (`jev-1.13-free`): `exo-free`, `ling-3.0-flash-fin-free`, `muse-spark-1.2/1.3-contributor-free`. A 1-token request on the model's real lane (Responses for muse, chat for the rest) decides per boot whether the id is exposed again, with a 30-minute retry; refused or still-pending ids stay hidden, so #56's conservative default holds until this egress proves otherwise (#82).
+
 ### Fixed
 
 - `https://` proxies in a subscription (or in `ipPool.manual`) are no longer dialed as plaintext and struck dead. Live diagnosis (2026-10-15): **46 of 118 exits** were `dead` with `transport · other side closed`, on ports 443/9002/9443 — all of them working proxies. The scheme passed the parser's whitelist and was then **discarded**: `protocol` kept its `'http'` initial value, so `ProxyAgent` was handed `http://host:443` and sent a bare `CONNECT` to a TLS listener. The listener closed without a status line, undici reported `SocketError: other side closed` (`client-h1.js` `onHttpSocketEnd`), and the §4.2 rule table — correctly, for what it was told — marked healthy exits dead. Sampling those exits directly: a plaintext `CONNECT` returned a clean FIN, the TLS handshake succeeded (`*.windscribe.com`, `*.nodes.gen4.ninja`), and a TLS-wrapped `CONNECT` answered `HTTP/1.1 200 OK`. Re-running the plugin's own admission over 8 of them: **0/8 admitted as `http`, 8/8 reached the upstream as `https`** (3 admitted, 1 `429`-limited, 4 answered the echo with an empty body → `malformed`, i.e. correctly *not* transport).
