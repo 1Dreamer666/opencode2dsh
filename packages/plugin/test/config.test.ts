@@ -95,3 +95,36 @@ test('Config declares and bounds the stream watchdog windows, undefined when uns
   assert.equal(resolveConfig({ firstEventMs: 300 }).firstEventMs, 300)
   assert.equal(resolveConfig().firstEventMs, undefined)
 })
+
+test('Config declares the delegation block, disabled by default, with per-field bounds', () => {
+  // issue #76: the delegation block must be reachable and validated like every
+  // other config field. Schemastery instantiates the nested object even when
+  // absent, so the shipped default is `enabled: false` — the block is inert and
+  // the anonymous path is unchanged unless the user explicitly enables it.
+  const bare = Config({})
+  assert.equal(bare.delegation.enabled, false, 'absent delegation defaults to disabled')
+
+  const config = Config({ delegation: { enabled: true } })
+  assert.equal(config.delegation.enabled, true)
+  assert.equal(config.delegation.minVersion, '1.18.0')
+  assert.equal(config.delegation.memLimit, '96MiB')
+  assert.equal(config.delegation.gcPercent, 30)
+  assert.equal(config.delegation.trimIntervalMs, 60_000)
+  assert.equal(config.delegation.startTimeoutMs, 60_000)
+  assert.equal(config.delegation.opencodePath, '')
+
+  const custom = Config({ delegation: { enabled: true, opencodePath: '/usr/bin/opencode', gcPercent: 50, trimIntervalMs: 0 } })
+  assert.equal(custom.delegation.opencodePath, '/usr/bin/opencode')
+  assert.equal(custom.delegation.gcPercent, 50)
+  assert.equal(custom.delegation.trimIntervalMs, 0)
+
+  // Out-of-range knobs are rejected rather than armed.
+  assert.throws(() => Config({ delegation: { gcPercent: 0 } }), /gcPercent/)
+  assert.throws(() => Config({ delegation: { trimIntervalMs: -1 } }), /trimIntervalMs/)
+  assert.throws(() => Config({ delegation: { startTimeoutMs: 10 } }), /startTimeoutMs/)
+
+  // resolveConfig passes an explicitly-set block through untouched; a raw
+  // (schema-less) config simply has no delegation key at all.
+  assert.equal(resolveConfig({ delegation: { enabled: true } }).delegation?.enabled, true)
+  assert.equal(resolveConfig().delegation, undefined)
+})
