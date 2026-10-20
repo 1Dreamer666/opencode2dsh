@@ -267,6 +267,15 @@ function toPiModel(id: string, reasoning: boolean, limits?: { contextWindow?: nu
     // data URLs, live-probed 2026-09-23; full round-trip through
     // DSH 0.1.7-rc.2 with mimo-v2.6-flash-free 2026-09-28).
     reasoning,
+    // Issue #96: pi-ai's DeepSeek auto-detection (provider === 'deepseek' ||
+    // baseUrl contains deepseek.com) matches neither this provider id nor the
+    // Zen baseUrl, so its requiresReasoningContentOnAssistantMessages
+    // fallback never fires on its own. Declaring it makes pi-ai write an
+    // empty reasoning_content on every replayed assistant message that lacks
+    // a signature — histories persisted before the signature round-trip
+    // existed, and reasoning from lanes that cannot carry one (the local
+    // opencode delegate). Upstream only requires the key to be present.
+    compat: { requiresReasoningContentOnAssistantMessages: true },
     input: isVisionModel(id, declaredModalities) ? ['text', 'image'] : ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: contextWindowFor(limits),
