@@ -578,7 +578,7 @@ test('the deepseek-v4.1 free lane advertises a serving cap below its verified ce
     assert.deepEqual(catalog.limits('deepseek-v4.1-flash-free'), { contextWindow: 300000, maxOutput: 32000 })
     // DSH compacts at 0.8x the declared window; at 300k that is 240k, and
     // 240k + the 32k output budget stays below the 315,596-token recall point.
-    assert.ok(catalog.limits('deepseek-v4.1-flash-free').contextWindow * 0.8 + 32000 < 315596)
+    assert.ok((catalog.limits('deepseek-v4.1-flash-free')?.contextWindow ?? 0) * 0.8 + 32000 < 315596)
     // the override only touches `contextWindow`; nothing else is invented
     assert.deepEqual(catalog.modalities('deepseek-v4.1-flash-free'), ['text'])
     assert.equal(catalog.decision('deepseek-v4.1-flash-free').allowed, true)
