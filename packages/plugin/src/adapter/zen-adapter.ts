@@ -786,13 +786,13 @@ export class ZenAdapter {
       // deadline timer is spent (pumpLive re-arms its own per pull)
       clearTimeout(deadlineTimer)
       if (preContentFailure === null && deliveredContent) {
-        yield* toStreamChunks(pumpLive(), model.contextWindow, GATE_TOOL_ALIASES)
+        yield* toStreamChunks(pumpLive(), GATE_TOOL_ALIASES)
         return
       }
       if (preContentFailure === null && !deliveredContent) {
         // stream ended cleanly with no content and no error: pass through
         // (pi-ai's empty-response classification owns this case)
-        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), model.contextWindow, GATE_TOOL_ALIASES)
+        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), GATE_TOOL_ALIASES)
         return
       }
       // Exit-shaped failure before content: ask the pool whether rotating is
@@ -840,7 +840,7 @@ export class ZenAdapter {
             break
           }
         }
-        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), model.contextWindow, GATE_TOOL_ALIASES)
+        yield* toStreamChunks((async function* pumped() { for (const e of buffered) yield e })(), GATE_TOOL_ALIASES)
         return
       }
       // rotate: loop re-runs #eventsFor inside the same ALS store; the pool

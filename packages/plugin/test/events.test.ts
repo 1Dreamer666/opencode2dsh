@@ -29,7 +29,6 @@ async function collect(events: PiEvent[]): Promise<HarnessChunk[]> {
     (async function* () {
       for (const event of events) yield event
     })(),
-    CONTEXT_WINDOW,
   )) {
     chunks.push(chunk)
   }
@@ -161,9 +160,19 @@ test('an empty completed response is an EMPTY_RESPONSE error', async () => {
   assert.equal(failure.code, 'EMPTY_RESPONSE')
 })
 
-test('silent context overflow is surfaced as CONTEXT_WINDOW_EXCEEDED', async () => {
+test('a healthy stop whose input exceeds the advertised window finishes cleanly (#99)', async () => {
+  // The wire count runs ~4-5k above the host's history estimate, so history
+  // filled to the advertised window lands above it on the wire. Upstream
+  // answered: the turn succeeded. Pre-fix this fabricated
+  // CONTEXT_WINDOW_EXCEEDED out of a healthy stop.
   const chunks = await collect([event({ usage: { input: CONTEXT_WINDOW + 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: CONTEXT_WINDOW + 1 } })])
-  assert.equal(failureOf(expectFinish(chunks[1])).code, 'CONTEXT_WINDOW_EXCEEDED')
+  assert.deepEqual(chunks[1], { type: 'finish', reason: { kind: 'stop' } })
+})
+
+test('an upstream context-exceeded error keeps CONTEXT_WINDOW_EXCEEDED with the upstream body preserved', async () => {
+  const message = "OpenAI API error (400): This model's maximum context length is 200000 tokens. However, you requested 205000 tokens."
+  const chunks = await collect([event({ stopReason: 'error', errorMessage: message })])
+  assert.deepEqual(failureOf(expectFinish(chunks[1])), { message, code: 'CONTEXT_WINDOW_EXCEEDED' })
 })
 
 test('a stream that ends without done/error is a bug and throws', async () => {

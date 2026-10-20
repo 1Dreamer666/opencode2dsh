@@ -52,7 +52,7 @@ function doneMessage(overrides: Partial<PiDoneMessage> = {}): PiDoneMessage {
 async function collectChunks(events: PiEvent[]): Promise<HarnessChunk[]> {
   const source = async function* () { yield* events }()
   const chunks: HarnessChunk[] = []
-  for await (const chunk of toStreamChunks(source, 128_000)) chunks.push(chunk)
+  for await (const chunk of toStreamChunks(source)) chunks.push(chunk)
   return chunks
 }
 
