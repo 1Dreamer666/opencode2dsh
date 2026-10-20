@@ -135,6 +135,20 @@ test('classifyStreamFailure maps the taxonomy', () => {
   assert.equal(classifyStreamFailure('400 bad request'), null)
 })
 
+test('classifyStreamFailure recognizes pi-ai premature stream endings', () => {
+  for (const message of [
+    'other side closed',
+    'HTTP2 request did not get a response',
+    'WebSocket closed unexpectedly',
+    'Anthropic stream ended before message_stop',
+    'OpenAI Responses stream ended before a terminal response event',
+    'openrouter stream ended without a terminal event',
+    'Stream ended without finish_reason',
+  ]) {
+    assert.equal(classifyStreamFailure(message), 'transport', message)
+  }
+})
+
 test('delegate: rotate while another usable exit exists, stop at the ceiling', () => {
   const pool = new ExitPool()
   pool.add(node({ id: 'a:1', exitIP: '1.1.1.1' }))

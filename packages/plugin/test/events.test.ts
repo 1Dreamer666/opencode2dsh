@@ -119,6 +119,27 @@ test('finish reasons: length, aborted, rate limit and other errors', async () =>
   assert.equal(failureOf(expectFinish(server[1])).code, 'SERVER')
 })
 
+test('pi-ai stream truncation wording stays on the TRANSPORT retry path', async () => {
+  // The native dsh-llm-pi-ai adapter maps all of these provider wordings to
+  // TRANSPORT. If the port falls through to UPSTREAM, dsh-llm-retry silently
+  // skips the failed step even though the free-lane policy retries TRANSPORT.
+  const messages = [
+    'other side closed',
+    'HTTP2 request did not get a response',
+    'WebSocket closed unexpectedly',
+    'terminated',
+    'Premature close',
+    'Anthropic stream ended before message_stop',
+    'OpenAI Responses stream ended before a terminal response event',
+    'openrouter stream ended without a terminal event',
+    'Stream ended without finish_reason',
+  ]
+  for (const message of messages) {
+    const chunks = await collect([event({ stopReason: 'error', errorMessage: message })])
+    assert.deepEqual(failureOf(expectFinish(chunks[1])), { message, code: 'TRANSPORT' }, message)
+  }
+})
+
 test('zero-cache usage omits the optional keys', async () => {
   const chunks = await collect([done()])
   assert.deepEqual(chunks[0], { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } })

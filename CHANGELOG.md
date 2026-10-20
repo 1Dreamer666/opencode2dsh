@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Premature provider stream endings (`Stream ended without finish_reason` and the other pi-ai transport wordings) are now classified as `TRANSPORT` instead of falling through to the `UPSTREAM` catch-all, so DSH's retry executor can re-run the failed step with the free lane's existing eight-attempt policy instead of ending the turn (#103). The same wording is recognized by the pool's pre-content `classifyStreamFailure`, so a truncation before any content can rotate to another exit. A failed partial attempt is not committed to durable history; this mitigates transient truncations but does not make an unstable upstream reliable.
+
 ## 0.3.14 (2026-10-20)
 
 ### Added

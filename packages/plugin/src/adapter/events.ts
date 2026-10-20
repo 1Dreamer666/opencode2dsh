@@ -10,6 +10,8 @@
  * (empty) GATE_TOOL_ALIASES and names pass through unchanged.
  */
 
+import { isStreamTruncationWording } from '../stream-truncation.ts'
+
 export type HarnessChunk =
   | { type: 'block-start'; index: number; blockType: 'text' | 'reasoning' | 'tool-call' }
   | { type: 'text-delta'; index: number; text: string }
@@ -80,7 +82,8 @@ function classifyError(text: string): string {
   if (/\b400\b|invalid.?request/i.test(text)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(text)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(text)) return 'TIMEOUT'
-  if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b|terminated|premature close/i.test(text)) return 'TRANSPORT'
+  if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b|terminated|premature close/i.test(text)
+    || isStreamTruncationWording(text)) return 'TRANSPORT'
   return 'UPSTREAM'
 }
 

@@ -15,6 +15,7 @@
  * dispose, so a disabled pool keeps the adapter's behavior unchanged.
  */
 
+import { isStreamTruncationWording } from '../stream-truncation.ts'
 import type { ExitPool } from './pool.ts'
 
 export type RotateFailure = 'transport' | 'limited' | 'refused'
@@ -111,7 +112,8 @@ export function classifyStreamFailure(errorMessage: string): RotateFailure | nul
   const text = errorMessage.toLowerCase()
   if (/\b429\b|rate.?limit|freeusagelimit/.test(text)) return 'limited'
   if (/\b(?:401|403)\b/.test(text)) return 'refused'
-  if (/\b(?:network|connection|socket|fetch|terminated|premature close)\b|\beconn[a-z]+\b|timeout|timed out/.test(text)) return 'transport'
+  if (/\b(?:network|connection|socket|fetch|terminated|premature close)\b|\beconn[a-z]+\b|timeout|timed out/.test(text)
+    || isStreamTruncationWording(text)) return 'transport'
   // 5xx joins the rotate set: through a wild proxy a 500 is as often the
   // proxy mangling the tunnel as the upstream itself — one exit change
   // before taking the error at face value (bounded by maxRotateAttempts).
