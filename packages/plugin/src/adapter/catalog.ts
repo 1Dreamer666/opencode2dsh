@@ -144,13 +144,21 @@ export function decide(model: string, prices: Map<string, ModelPrice>, ready: bo
  *   V2.6 Flash model card and the official OpenCode CLI config use 1048576.
  * - `deepseek-v4.1-flash-free`: declares `limit.context: 200000` while its paid
  *   twin `deepseek-v4.1-flash` (same canonical id
- *   `deepseek/deepseek-v4.1-flash`) declares 1000000. Needle-in-a-haystack
- *   probes of the live free lane (2026-10-16) recall correctly at
- *   1,011,668 prompt tokens, so the window is at least that (#81).
+ *   `deepseek/deepseek-v4.1-flash`) declares 1000000. #81 widened the free
+ *   entry to 1048576 after a 2026-10-16 needle probe recalled at 1,011,668
+ *   prompt tokens. A repeat probe of the same lane on 2026-10-20 recalls at
+ *   315,596 prompt tokens, while a ~326k-token prompt is refused with
+ *   `context_length_exceeded`; the free lane no longer serves 1M. Declaring
+ *   1M is also actively harmful: DSH compacts at 0.8 × contextWindow (=800k),
+ *   so a long session grows past the real ceiling without ever compacting and
+ *   then fails with a hard upstream error (#99). 300000 is the conservative
+ *   serving value: DSH compacts at 240k, and a 240k prompt plus the model's
+ *   32k output budget is 272k, still below the verified 315,596-token recall
+ *   point; it also keeps >200k usable.
  */
 const LOCAL_MODEL_OVERRIDES: Readonly<Record<string, Partial<ModelPrice>>> = {
   'mimo-v2.6-flash-free': { contextWindow: 1048576 },
-  'deepseek-v4.1-flash-free': { contextWindow: 1048576 },
+  'deepseek-v4.1-flash-free': { contextWindow: 300000 },
 }
 
 /** Shallow per-field override: declared fields win, the rest pass through. */

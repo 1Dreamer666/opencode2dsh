@@ -547,12 +547,16 @@ test('blocklist: issue #56 dead models are denied before any metadata or S3 vouc
   }
 })
 
-test('the deepseek-v4.1 free lane keeps its full context window (issue #81)', async () => {
+test('the deepseek-v4.1 free lane advertises a serving cap below its verified ceiling (issue #99)', async () => {
   // models.dev puts the free and paid twins of one canonical model in different
   // limit buckets: deepseek-v4.1-flash-free declares 200000 while
-  // deepseek-v4.1-flash declares 1000000. Needle probes of the free lane recall
-  // at 1,011,668 prompt tokens, so the override speaks 1048576 and leaves every
-  // other declared field alone.
+  // deepseek-v4.1-flash declares 1000000. #81 widened the free entry to
+  // 1048576 after a 2026-10-16 needle probe recalled at 1,011,668 prompt
+  // tokens. The 2026-10-20 re-probe of the same lane only recalls at 315,596
+  // prompt tokens, and a ~326k-token prompt is refused with
+  // context_length_exceeded. The override now speaks 300000 so DSH's 0.8x
+  // compaction threshold (240k) fires below the real ceiling; maxOutput and
+  // every other declared field stay untouched.
   const catalog = new ModelCatalog({
     fetchImpl: fakeFetch({
       [ZEN_MODELS_URL]: { data: [{ id: 'deepseek-v4.1-flash-free' }] },
@@ -571,7 +575,10 @@ test('the deepseek-v4.1 free lane keeps its full context window (issue #81)', as
   })
   try {
     await catalog.refreshOnce()
-    assert.deepEqual(catalog.limits('deepseek-v4.1-flash-free'), { contextWindow: 1048576, maxOutput: 32000 })
+    assert.deepEqual(catalog.limits('deepseek-v4.1-flash-free'), { contextWindow: 300000, maxOutput: 32000 })
+    // DSH compacts at 0.8x the declared window; at 300k that is 240k, and
+    // 240k + the 32k output budget stays below the 315,596-token recall point.
+    assert.ok(catalog.limits('deepseek-v4.1-flash-free').contextWindow * 0.8 + 32000 < 315596)
     // the override only touches `contextWindow`; nothing else is invented
     assert.deepEqual(catalog.modalities('deepseek-v4.1-flash-free'), ['text'])
     assert.equal(catalog.decision('deepseek-v4.1-flash-free').allowed, true)
