@@ -84,15 +84,19 @@ function classifyError(text: string): string {
   return 'UPSTREAM'
 }
 
-function isContextOverflow(message: PiDoneMessage, contextWindow: number): boolean {
-  // pi-ai isContextOverflow equivalent: error-free finish whose input usage
-  // alone exceeds the resolved window.
-  return message.stopReason === 'stop' && message.usage.input > contextWindow
-}
-
-/** mapStopReason (dsh-llm-pi-ai index.js:1286-1330). */
-function mapStopReason(message: PiDoneMessage, contextWindow: number): FinishReason {
-  if (isContextOverflow(message, contextWindow) || (message.stopReason === 'error' && message.errorMessage !== undefined && /context/i.test(message.errorMessage) && /exceed|window|length|token/i.test(message.errorMessage))) {
+/**
+ * mapStopReason (dsh-llm-pi-ai index.js:1286-1330), with one deliberate
+ * divergence (#99): the original classified an error-free `stop` finish as
+ * CONTEXT_WINDOW_EXCEEDED whenever usage.input alone exceeded the resolved
+ * window (its isContextOverflow). The wire token count runs ~4-5k above the
+ * host's history estimate (system prompt + gate tools + serialization), so a
+ * history filled to the advertised window reliably tripped the heuristic and
+ * fabricated an error out of a turn the upstream had answered. Here a healthy
+ * stop is a success at any size; a genuine upstream context refusal arrives
+ * as stopReason 'error' and is classified by the message regex below.
+ */
+function mapStopReason(message: PiDoneMessage): FinishReason {
+  if (message.stopReason === 'error' && message.errorMessage !== undefined && /context/i.test(message.errorMessage) && /exceed|window|length|token/i.test(message.errorMessage)) {
     return {
       kind: 'error',
       failure: {
@@ -140,7 +144,6 @@ function mapUsage(usage: PiDoneMessage['usage']): Extract<HarnessChunk, { type: 
  */
 export async function* toStreamChunks(
   events: AsyncIterable<PiEvent>,
-  contextWindow: number,
   toolNameAlias?: Record<string, string>,
 ): AsyncGenerator<HarnessChunk> {
   const toolIds = new Map<number, { id: string; name: string }>()
@@ -215,11 +218,11 @@ export async function* toStreamChunks(
         break
       case 'done':
         yield { type: 'usage', usage: mapUsage(event.message.usage) }
-        yield { type: 'finish', reason: mapStopReason(event.message, contextWindow) }
+        yield { type: 'finish', reason: mapStopReason(event.message) }
         return
       case 'error':
         yield { type: 'usage', usage: mapUsage(event.error.usage) }
-        yield { type: 'finish', reason: mapStopReason(event.error, contextWindow) }
+        yield { type: 'finish', reason: mapStopReason(event.error) }
         return
     }
   }
