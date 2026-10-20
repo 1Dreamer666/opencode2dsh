@@ -19,7 +19,7 @@ export interface HarnessTool {
 
 export type HarnessBlock =
   | { type: 'text'; text: string }
-  | { type: 'reasoning'; text: string }
+  | { type: 'reasoning'; text: string; signature?: string }
   | { type: 'tool-call'; id: string; name: string; arguments: string }
   | { type: 'image'; [key: string]: unknown }
   | { type: 'tool-result'; toolCallId: string; content: HarnessBlock[]; isError?: boolean; [key: string]: unknown }
@@ -68,7 +68,7 @@ export type PiMessage =
 
 export type PiAssistantBlock =
   | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string }
+  | { type: 'thinking'; thinking: string; thinkingSignature?: string }
   | { type: 'toolCall'; id: string; name: string; arguments: Record<string, unknown> }
 
 export type PiContentBlock = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
@@ -204,9 +204,16 @@ function toPiAssistant(message: HarnessMessage, providerId: string): Extract<PiM
       case 'text':
         content.push({ type: 'text', text: block.text })
         break
-      case 'reasoning':
-        content.push({ type: 'thinking', thinking: block.text })
+      case 'reasoning': {
+        // Issue #96: restore the persisted signature (the upstream reasoning
+        // field name pi-ai recorded at stream time) so pi-ai serializes the
+        // thinking block back under the same key instead of dropping the
+        // reasoning_content field from the replayed assistant message.
+        const thinking: PiAssistantBlock = { type: 'thinking', thinking: block.text }
+        if (typeof block.signature === 'string' && block.signature.length > 0) thinking.thinkingSignature = block.signature
+        content.push(thinking)
         break
+      }
       case 'tool-call':
         content.push({ type: 'toolCall', id: block.id, name: block.name, arguments: parseArguments(block.arguments) })
         break

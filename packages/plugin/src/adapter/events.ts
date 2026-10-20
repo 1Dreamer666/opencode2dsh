@@ -13,7 +13,7 @@
 export type HarnessChunk =
   | { type: 'block-start'; index: number; blockType: 'text' | 'reasoning' | 'tool-call' }
   | { type: 'text-delta'; index: number; text: string }
-  | { type: 'block-end'; index: number; block: { type: 'text'; text: string } | { type: 'reasoning'; text: string } | { type: 'tool-call'; id: string; name: string; arguments: string } }
+  | { type: 'block-end'; index: number; block: { type: 'text'; text: string } | { type: 'reasoning'; text: string; signature?: string } | { type: 'tool-call'; id: string; name: string; arguments: string } }
   | { type: 'reasoning-delta'; index: number; text: string }
   | { type: 'tool-call-delta'; index: number; id: string; name?: string; argumentsDelta: string }
   | { type: 'usage'; usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } }
@@ -164,9 +164,24 @@ export async function* toStreamChunks(
       case 'thinking_delta':
         yield { type: 'reasoning-delta', index: event.contentIndex, text: event.delta }
         break
-      case 'thinking_end':
-        yield { type: 'block-end', index: event.contentIndex, block: { type: 'reasoning', text: event.content } }
+      case 'thinking_end': {
+        // Issue #96: pi-ai records the upstream reasoning field name (the key
+        // it will replay the block under, e.g. 'reasoning_content') as the
+        // thinking block's thinkingSignature. Carry it on the harness block so
+        // the persisted history can hand it back at rebuild time; a replayed
+        // assistant message without the field makes thinking-mode upstreams
+        // (Zen's DeepSeek) reject the request with a 400.
+        const partial = event.partial.content[event.contentIndex]
+        const signature = partial?.type === 'thinking' && typeof partial.thinkingSignature === 'string' && partial.thinkingSignature.length > 0
+          ? partial.thinkingSignature
+          : undefined
+        yield {
+          type: 'block-end',
+          index: event.contentIndex,
+          block: { type: 'reasoning', text: event.content, ...(signature !== undefined ? { signature } : {}) },
+        }
         break
+      }
       case 'toolcall_start': {
         const partial = event.partial.content[event.contentIndex]
         const id = partial?.type === 'toolCall' ? (partial.id ?? '') : ''
